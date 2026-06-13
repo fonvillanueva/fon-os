@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 
 const BUCKETS = [
   { id: "school",  label: "School",   icon: "📚", color: { text: "text-blue-400",    border: "border-blue-800",    tag: "bg-blue-900 text-blue-300",    bar: "bg-blue-400",    dim: "text-blue-600" } },
-  { id: "mank9",   label: "Man K9",   icon: "🐕", color: { text: "text-amber-400",   border: "border-amber-800",   tag: "bg-amber-900 text-amber-300",   bar: "bg-amber-400",   dim: "text-amber-600" } },
+  { id: "reading", label: "Reading",  icon: "📖", color: { text: "text-teal-400",    border: "border-teal-800",    tag: "bg-teal-900 text-teal-300",    bar: "bg-teal-400",    dim: "text-teal-600" } },
   { id: "family",  label: "Family",   icon: "🏠", color: { text: "text-emerald-400", border: "border-emerald-800", tag: "bg-emerald-900 text-emerald-300", bar: "bg-emerald-400", dim: "text-emerald-600" } },
   { id: "faith",   label: "Faith",    icon: "✝️", color: { text: "text-purple-400",  border: "border-purple-800",  tag: "bg-purple-900 text-purple-300",  bar: "bg-purple-400",  dim: "text-purple-600" } },
   { id: "home",    label: "Home",     icon: "🔧", color: { text: "text-rose-400",    border: "border-rose-800",    tag: "bg-rose-900 text-rose-300",    bar: "bg-rose-400",    dim: "text-rose-600" } },
@@ -22,13 +22,12 @@ const SEED = {
       { id: "s4", text: "Identify 2 pre-law electives for next term", done: false, priority: "—", dueDate: "" },
     ],
   },
-  mank9: {
-    status: "Operations stable. Working on SOP documentation.",
+  reading: {
+    status: "Currently reading — notes and takeaways.",
     items: [
-      { id: "m1", text: "Confirm training schedule for active handlers", done: false, priority: "!", dueDate: "" },
-      { id: "m2", text: "Draft core SOPs for Man K9 operations", done: false, priority: "!", dueDate: "" },
-      { id: "m3", text: "Define handoff boundaries with Fon K9 (dad + sister)", done: false, priority: "—", dueDate: "" },
-      { id: "m4", text: "Review open client follow-ups", done: false, priority: "—", dueDate: "" },
+      { id: "rd1", text: "Current chapter notes", done: false, priority: "!", dueDate: "" },
+      { id: "rd2", text: "Key quotes to remember", done: false, priority: "—", dueDate: "" },
+      { id: "rd3", text: "Apply one idea this week", done: false, priority: "!", dueDate: "" },
     ],
   },
   family: {
