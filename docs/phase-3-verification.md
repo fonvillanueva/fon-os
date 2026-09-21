@@ -184,8 +184,33 @@ the entry needs a role that has the membership.
 Paste `supabase/apply-all.sql` again. It is idempotent; it adds the `TRUNCATE`
 guard and clears any foreign-owned default privileges.
 
+**Result — recorded 2026-09-21: completed, no error.**
+
+`app.revoke_api_default_privileges()` returned one row with a blank value, which
+is how a `void`-returning function renders — the expected success shape. No
+`WARNING` was displayed.
+
+The function raises its `WARNING` only when at least one revoke was refused for
+lack of membership. Taken at face value, no warning means every revoke
+succeeded, i.e. the role running the SQL Editor does have the membership needed
+to alter `supabase_admin`'s default privileges.
+
+**That inference is not treated as proof**, for one reason: it is not
+established that the Supabase SQL Editor surfaces `WARNING` messages at all. If
+it does not, the absence of one carries no information.
+
+So the outcome is settled by direct observation of the end state instead:
+**check 18** reads `pg_default_acl` and reports FAIL, naming the owning role, if
+any entry granting `anon` or `authenticated` in `public` survives. That reading
+is independent of whether messages render, which is why the check exists.
+
 ### Step 3 — re-verify
 
-Paste `supabase/verify.sql` again. Expect **19 checks, OVERALL PASS**.
+Paste `supabase/verify.sql` again. Expect **19 checks plus the verdict — 20
+rows — and OVERALL PASS**.
+
+Check 18 is the one that settles Step 2: PASS means the default-ACL entries are
+gone; FAIL names the role that still owns them, and the remediation is to run
+the revoke as a role holding that membership.
 
 **Result:** _to be recorded here._
