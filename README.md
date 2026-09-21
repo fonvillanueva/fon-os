@@ -140,6 +140,12 @@ tasks; everywhere else `visibility` is forced to `private` by
 hand-edited backup file. Moving a task never widens its sharing — only an Inbox
 capture, which has no meaningful scope yet, adopts its destination's default.
 
+The **Phase 3 Supabase database foundation** is built but not connected: see
+[`docs/phase-3-supabase.md`](docs/phase-3-supabase.md) for the schema, the
+migrations, the fail-closed RLS posture, the idempotent import path from an
+export file, and what Free-plan pausing means for backups. The app still reads
+and writes `localStorage` and is unaffected by it.
+
 Login, roles, and the Pong API are **not built yet**. See
 [`docs/phase-3-5-plan.md`](docs/phase-3-5-plan.md) for the Supabase schema, the
 RLS model for Fon / Abigail / Accountability, and the scoped Pong interface.

@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Secrets. .env.example is the committed template and holds placeholders only.
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
