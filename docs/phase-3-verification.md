@@ -1,5 +1,12 @@
 # Phase 3 verification record
 
+> ⚠️ **The 16/16 result below is superseded.** Two blockers found in independent
+> review changed the schema: the default-privilege revoke is now role-scoped
+> correctly, and `audit_log` gained a `TRUNCATE` guard. `verify.sql` now runs
+> **19 checks**. The hosted project must be re-applied and re-verified; see
+> [Re-verification after the review fixes](#re-verification-after-the-review-fixes)
+> at the end. The record below is kept as the history of the first apply.
+
 The Phase 3 schema was applied to the hosted Free-plan Supabase project via
 `supabase/apply-all.sql` in the SQL Editor, and checked with
 `supabase/verify.sql`. This is the captured result, for the independent review.
@@ -96,3 +103,52 @@ Free-plan projects pause after roughly a week of inactivity. Restoring is free
 and manual and **preserves data**. While this PR waits for review the project
 will pause; that is expected and harmless. The app's JSON **Export backup**
 remains the backup that depends on nothing — see `phase-3-supabase.md`.
+
+
+---
+
+## Re-verification after the review fixes
+
+Two independent-review findings changed the schema after the result above was
+recorded, so that result no longer describes the database.
+
+| Finding | Change |
+|---|---|
+| **Phase 4 blocker** — `ALTER DEFAULT PRIVILEGES` is role-scoped, so the revoke was a silent no-op for entries owned by `supabase_admin` | Migration now revokes `FOR ROLE` each owning role; `verify.sql` gains checks 18 and 19 |
+| **Phase 5 blocker** — a row-level trigger cannot fire on `TRUNCATE`, so the audit log could be emptied in one statement | Added statement-level `audit_log_no_truncate`; `verify.sql` check 12 now asserts both guards |
+
+Both were reproduced offline before being fixed, and both fixes were confirmed
+by reverting them and watching the new tests fail (14 failures for the
+`TRUNCATE` guard, 5 for the default privileges).
+
+### Step 1 — diagnostic (read-only)
+
+Run in the Supabase SQL Editor. It reads catalog only, changes nothing, and
+needs no credential beyond SQL Editor access:
+
+```sql
+select defaclrole::regrole              as for_role,
+       defaclnamespace::regnamespace    as schema,
+       defaclobjtype                    as objtype,
+       defaclacl::text                  as acl
+from pg_default_acl;
+```
+
+**Result:** _to be recorded here._
+
+This answers whether the hosted project's default-ACL entries are owned by the
+role that ran `apply-all.sql`. If they are, the original statements did work and
+this reduces to hardening plus the new checks. If they are owned by
+`supabase_admin` or another role, the original revoke was a no-op and the fix is
+load-bearing.
+
+### Step 2 — re-apply
+
+Paste `supabase/apply-all.sql` again. It is idempotent; it adds the `TRUNCATE`
+guard and clears any foreign-owned default privileges.
+
+### Step 3 — re-verify
+
+Paste `supabase/verify.sql` again. Expect **19 checks, OVERALL PASS**.
+
+**Result:** _to be recorded here._

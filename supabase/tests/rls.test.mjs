@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { expectViolation, freshDb, insertTask, resetDb } from "./harness.mjs";
+import { applyMigrations, expectViolation, freshDb, insertTask, resetDb } from "./harness.mjs";
 
 const TABLES = [
   "tasks", "area_notes", "profiles", "audit_log", "idempotency_keys", "import_batches",
@@ -116,6 +116,114 @@ describe("RLS holds even where a grant exists", () => {
 
     const { rows: actual } = await db.query("select title from public.tasks");
     expect(actual[0].title).toBe("Private task");
+  });
+});
+
+describe("default privileges for tables created later", () => {
+  // ALTER DEFAULT PRIVILEGES with no FOR ROLE edits only the entries owned by
+  // the role running it. Supabase seeds its own as supabase_admin, so an
+  // unqualified revoke run as anyone else is a silent no-op — and every table
+  // created afterwards lands with full anon grants and RLS off.
+  async function withForeignDefaultAcl() {
+    const database = await freshDb({ migrate: false });
+    await database.exec("create role seeding_admin superuser");
+    await database.exec(
+      "alter default privileges for role seeding_admin in schema public grant all on tables to anon, authenticated",
+    );
+    return database;
+  }
+
+  async function defaultAclOwners(database) {
+    const { rows } = await database.query(`
+      select pg_get_userbyid(defaclrole) as owner
+      from pg_default_acl
+      where defaclnamespace = 'public'::regnamespace
+        and (defaclacl::text like '%anon=%' or defaclacl::text like '%authenticated=%')
+    `);
+    return rows.map((r) => r.owner);
+  }
+
+  it("reproduces the hazard: an unqualified revoke leaves a foreign entry intact", async () => {
+    const database = await withForeignDefaultAcl();
+    try {
+      await database.exec("alter default privileges in schema public revoke all on tables from anon, authenticated");
+      expect(await defaultAclOwners(database)).toEqual(["seeding_admin"]);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("the migration clears a default-ACL entry owned by another role", async () => {
+    const database = await withForeignDefaultAcl();
+    try {
+      expect(await defaultAclOwners(database)).toEqual(["seeding_admin"]);
+      await applyMigrations(database);
+      expect(await defaultAclOwners(database)).toEqual([]);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("so a table that role creates afterwards grants anon nothing", async () => {
+    const database = await withForeignDefaultAcl();
+    try {
+      await applyMigrations(database);
+      await database.exec("set role seeding_admin; create table public.created_later (id int); reset role");
+
+      const { rows } = await database.query(
+        "select has_table_privilege('anon', 'public.created_later', 'SELECT') as granted",
+      );
+      expect(rows[0].granted).toBe(false);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("clears entries for sequences and functions too, not only tables", async () => {
+    const database = await freshDb({ migrate: false });
+    try {
+      await database.exec("create role seeding_admin superuser");
+      await database.exec(`
+        alter default privileges for role seeding_admin in schema public grant all on sequences to anon;
+        alter default privileges for role seeding_admin in schema public grant execute on functions to authenticated;
+      `);
+      expect(await defaultAclOwners(database)).toHaveLength(2);
+
+      await applyMigrations(database);
+      expect(await defaultAclOwners(database)).toEqual([]);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("is idempotent — re-running finds nothing left to revoke", async () => {
+    const database = await withForeignDefaultAcl();
+    try {
+      await applyMigrations(database);
+      await expect(applyMigrations(database)).resolves.not.toThrow();
+      expect(await defaultAclOwners(database)).toEqual([]);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("leaves default privileges for other roles alone", async () => {
+    const database = await freshDb({ migrate: false });
+    try {
+      await database.exec("create role seeding_admin superuser");
+      await database.exec("create role reporting nologin");
+      await database.exec("alter default privileges for role seeding_admin in schema public grant select on tables to reporting");
+
+      await applyMigrations(database);
+
+      const { rows } = await database.query(`
+        select defaclacl::text as acl from pg_default_acl
+        where defaclnamespace = 'public'::regnamespace
+      `);
+      expect(rows.some((r) => r.acl.includes("reporting="))).toBe(true);
+    } finally {
+      await database.close();
+    }
   });
 });
 

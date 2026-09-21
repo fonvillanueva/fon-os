@@ -253,8 +253,18 @@ create trigger area_notes_touch_updated_at
 -- Three tables Phase 5 depends on. Created now so the schema is complete and
 -- reviewable, but nothing writes to them yet.
 
--- Append-only record of every write Pong makes. No foreign key to tasks: the
+-- Tamper-evident record of every write Pong makes. No foreign key to tasks: the
 -- log must outlive the row it describes.
+--
+-- UPDATE and DELETE are refused by a row-level trigger; TRUNCATE by a
+-- statement-level one, because a row-level trigger cannot fire on TRUNCATE and
+-- would otherwise let the whole log be emptied in a single statement. Both
+-- refuse for every role, service_role included: it bypasses RLS, but not
+-- triggers.
+--
+-- DROP TABLE remains available to the table owner. That is accepted: it is not
+-- silent and it requires owner rights, whereas TRUNCATE looks like an ordinary
+-- data operation and leaves an intact, empty table behind.
 create table if not exists public.audit_log (
   id         bigint generated always as identity primary key,
   at         timestamptz not null default now(),
@@ -272,7 +282,7 @@ create table if not exists public.audit_log (
 );
 
 comment on table public.audit_log is
-  'Append-only. UPDATE and DELETE raise, including for service_role, which bypasses RLS but not triggers.';
+  'Append-only: UPDATE, DELETE and TRUNCATE all raise, for every role including service_role, which bypasses RLS but not triggers. DROP TABLE remains available to the owner.';
 
 create index if not exists audit_log_task_id_idx on public.audit_log (task_id);
 create index if not exists audit_log_at_idx on public.audit_log (at desc);
@@ -281,6 +291,14 @@ drop trigger if exists audit_log_append_only on public.audit_log;
 create trigger audit_log_append_only
   before update or delete on public.audit_log
   for each row execute function app.forbid_mutation();
+
+-- TRUNCATE needs its own statement-level trigger: a FOR EACH ROW trigger never
+-- fires on it, so without this the entire log could be emptied in one
+-- statement, leaving no trace.
+drop trigger if exists audit_log_no_truncate on public.audit_log;
+create trigger audit_log_no_truncate
+  before truncate on public.audit_log
+  for each statement execute function app.forbid_mutation();
 
 -- Replay protection for Pong. A repeated voice request carrying the same key
 -- returns the stored response instead of acting twice.
@@ -370,7 +388,67 @@ begin
 end;
 $$;
 
--- Stop future tables in this schema from inheriting the default grants.
+-- ─── DEFAULT PRIVILEGES FOR FUTURE TABLES ─────────────────────────────────────
+--
+-- `ALTER DEFAULT PRIVILEGES` with no `FOR ROLE` edits only the default-ACL
+-- entries owned by the role *executing the statement*. Supabase seeds its own
+-- entries for anon/authenticated as `supabase_admin` (or `postgres`), so an
+-- unqualified revoke run as anyone else is a silent no-op — and a table created
+-- later lands with full anon/authenticated privileges and RLS off.
+--
+-- So: enumerate every role that owns such an entry in schema `public` and
+-- revoke explicitly `FOR ROLE` each one. Re-running is a no-op because the loop
+-- finds nothing left to revoke.
+--
+-- `ALTER DEFAULT PRIVILEGES FOR ROLE x` requires membership of x. If that is
+-- missing the statement is skipped with a loud WARNING naming the exact
+-- remediation, and `supabase/verify.sql` check 17 reports FAIL — the failure is
+-- never silent.
+
+do $$
+declare
+  entry     record;
+  obj_label text;
+  blocked   text := '';
+begin
+  for entry in
+    select distinct defaclrole as role_oid,
+           pg_get_userbyid(defaclrole) as role_name,
+           defaclobjtype as objtype
+    from pg_default_acl
+    where defaclnamespace = 'public'::regnamespace
+      and (defaclacl::text like '%anon=%' or defaclacl::text like '%authenticated=%')
+  loop
+    obj_label := case entry.objtype
+                   when 'r' then 'TABLES'
+                   when 'S' then 'SEQUENCES'
+                   when 'f' then 'FUNCTIONS'
+                   when 'T' then 'TYPES'
+                 end;
+    continue when obj_label is null;
+
+    begin
+      execute format(
+        'alter default privileges for role %I in schema public revoke all on %s from anon, authenticated',
+        entry.role_name, obj_label
+      );
+    exception
+      when insufficient_privilege then
+        blocked := blocked || format(E'\n  alter default privileges for role %I in schema public revoke all on %s from anon, authenticated;',
+                                     entry.role_name, obj_label);
+    end;
+  end loop;
+
+  if blocked <> '' then
+    raise warning
+      E'Could not revoke default privileges owned by another role (membership required).\nRun these as a role that has it (Supabase: the postgres or supabase_admin role):%s',
+      blocked;
+  end if;
+end;
+$$;
+
+-- Also cover the executing role's own entries, including ones that do not exist
+-- yet and so were invisible to the loop above.
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 alter default privileges in schema public revoke all on functions from anon, authenticated;

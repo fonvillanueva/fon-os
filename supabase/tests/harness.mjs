@@ -80,9 +80,12 @@ export async function resetDb(db) {
       public.import_batches,
       auth.users
     restart identity cascade;
-    alter table public.audit_log disable trigger audit_log_append_only;
+    -- audit_log refuses TRUNCATE as well as UPDATE/DELETE, so both guards have
+    -- to come off. DISABLE TRIGGER USER covers them without touching internal
+    -- constraint triggers, and survives a third guard being added later.
+    alter table public.audit_log disable trigger user;
     truncate table public.audit_log restart identity cascade;
-    alter table public.audit_log enable trigger audit_log_append_only;
+    alter table public.audit_log enable trigger user;
   `);
 }
 

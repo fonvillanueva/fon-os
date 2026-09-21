@@ -34,7 +34,67 @@ begin
 end;
 $$;
 
--- Stop future tables in this schema from inheriting the default grants.
+-- ─── DEFAULT PRIVILEGES FOR FUTURE TABLES ─────────────────────────────────────
+--
+-- `ALTER DEFAULT PRIVILEGES` with no `FOR ROLE` edits only the default-ACL
+-- entries owned by the role *executing the statement*. Supabase seeds its own
+-- entries for anon/authenticated as `supabase_admin` (or `postgres`), so an
+-- unqualified revoke run as anyone else is a silent no-op — and a table created
+-- later lands with full anon/authenticated privileges and RLS off.
+--
+-- So: enumerate every role that owns such an entry in schema `public` and
+-- revoke explicitly `FOR ROLE` each one. Re-running is a no-op because the loop
+-- finds nothing left to revoke.
+--
+-- `ALTER DEFAULT PRIVILEGES FOR ROLE x` requires membership of x. If that is
+-- missing the statement is skipped with a loud WARNING naming the exact
+-- remediation, and `supabase/verify.sql` check 17 reports FAIL — the failure is
+-- never silent.
+
+do $$
+declare
+  entry     record;
+  obj_label text;
+  blocked   text := '';
+begin
+  for entry in
+    select distinct defaclrole as role_oid,
+           pg_get_userbyid(defaclrole) as role_name,
+           defaclobjtype as objtype
+    from pg_default_acl
+    where defaclnamespace = 'public'::regnamespace
+      and (defaclacl::text like '%anon=%' or defaclacl::text like '%authenticated=%')
+  loop
+    obj_label := case entry.objtype
+                   when 'r' then 'TABLES'
+                   when 'S' then 'SEQUENCES'
+                   when 'f' then 'FUNCTIONS'
+                   when 'T' then 'TYPES'
+                 end;
+    continue when obj_label is null;
+
+    begin
+      execute format(
+        'alter default privileges for role %I in schema public revoke all on %s from anon, authenticated',
+        entry.role_name, obj_label
+      );
+    exception
+      when insufficient_privilege then
+        blocked := blocked || format(E'\n  alter default privileges for role %I in schema public revoke all on %s from anon, authenticated;',
+                                     entry.role_name, obj_label);
+    end;
+  end loop;
+
+  if blocked <> '' then
+    raise warning
+      E'Could not revoke default privileges owned by another role (membership required).\nRun these as a role that has it (Supabase: the postgres or supabase_admin role):%s',
+      blocked;
+  end if;
+end;
+$$;
+
+-- Also cover the executing role's own entries, including ones that do not exist
+-- yet and so were invisible to the loop above.
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 alter default privileges in schema public revoke all on functions from anon, authenticated;

@@ -212,11 +212,63 @@ describe("audit_log is append-only", () => {
     expect(error.message).toMatch(/append-only/);
   });
 
+  // A FOR EACH ROW trigger never fires on TRUNCATE. Without a statement-level
+  // guard the whole log could be emptied in one statement, leaving no trace —
+  // which is precisely the actor the log exists to keep honest.
+  it("raises on TRUNCATE as the table owner", async () => {
+    const error = await expectViolation(() => db.query("truncate public.audit_log"));
+    expect(error.message).toMatch(/append-only/);
+  });
+
+  it("raises on TRUNCATE as service_role, which bypasses RLS but not triggers", async () => {
+    await db.exec(`
+      grant usage on schema public to service_role;
+      grant all on public.audit_log to service_role;
+    `);
+    await db.exec("set role service_role");
+    const error = await expectViolation(() => db.query("truncate public.audit_log"));
+    await db.exec("reset role");
+
+    expect(error.message).toMatch(/append-only/);
+  });
+
+  it("keeps its rows after every refused attempt", async () => {
+    for (const statement of [
+      "update public.audit_log set action = 'tampered'",
+      "delete from public.audit_log",
+      "truncate public.audit_log",
+    ]) {
+      await expectViolation(() => db.query(statement));
+    }
+    const { rows } = await db.query("select count(*)::int n from public.audit_log");
+    expect(rows[0].n).toBe(1);
+  });
+
   it("survives deletion of the task it describes", async () => {
     await insertTask(db);
     await db.query("delete from public.tasks");
     const { rows } = await db.query("select count(*)::int n from public.audit_log");
     expect(rows[0].n).toBe(1);
+  });
+});
+
+describe("the test harness still clears audit_log between cases", () => {
+  // resetDb disables the triggers to truncate. If that ever silently stopped
+  // working, every audit assertion above would leak state into the next test
+  // and the suite would still be green.
+  it("starts each case with an empty audit_log", async () => {
+    const { rows } = await db.query("select count(*)::int n from public.audit_log");
+    expect(rows[0].n).toBe(0);
+  });
+
+  it("re-enables both guards after resetting", async () => {
+    const { rows } = await db.query(`
+      select tgname, tgenabled from pg_trigger
+      where tgrelid = 'public.audit_log'::regclass and not tgisinternal
+      order by tgname
+    `);
+    expect(rows.map((r) => r.tgname)).toEqual(["audit_log_append_only", "audit_log_no_truncate"]);
+    expect(rows.every((r) => r.tgenabled === "O")).toBe(true);
   });
 });
 

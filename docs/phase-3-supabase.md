@@ -87,7 +87,7 @@ Constraints worth calling out:
 |---|---|
 | `area_notes` | One status note per area. Keyed by `area`, so import is an upsert. |
 | `profiles` | **Phase 4 preparation.** Maps an `auth.users` id to `fon` / `abigail` / `accountability`, one holder each. No policies, no grants, no sign-up hook. |
-| `audit_log` | Append-only record of Pong's writes. `UPDATE` and `DELETE` raise — including for `service_role`, which bypasses RLS but not triggers. No FK to `tasks`, so the log outlives the row. |
+| `audit_log` | Tamper-evident record of Pong's writes. **`UPDATE`, `DELETE` and `TRUNCATE` all raise**, for every role including `service_role`, which bypasses RLS but not triggers. `DROP TABLE` remains available to the owner — accepted, because it is not silent and needs owner rights, whereas `TRUNCATE` looks like a data operation and leaves an intact, empty table. No FK to `tasks`, so the log outlives the row. |
 | `idempotency_keys` | Phase 5 replay protection: a duplicate voice request returns the stored response instead of creating a second task. |
 | `import_batches` | `unique (kind, checksum)` — applying the same export twice is a no-op before any task row is touched. |
 
@@ -110,9 +110,23 @@ writes the first policy; until then `anon` and `authenticated` reach nothing.
 the owner cannot quietly read the board.
 
 The default grants Supabase hands `anon` and `authenticated` are explicitly
-revoked, and `ALTER DEFAULT PRIVILEGES` stops future tables inheriting them —
-so the denial does not rest on RLS alone. `supabase/tests/rls.test.mjs` proves
-both halves: a role that has been *granted* `SELECT` still reads zero rows.
+revoked, so the denial does not rest on RLS alone. `supabase/tests/rls.test.mjs`
+proves both halves: a role that has been *granted* `SELECT` still reads zero rows.
+
+### Default privileges are revoked per owning role
+
+`ALTER DEFAULT PRIVILEGES` with no `FOR ROLE` edits only the entries owned by
+the role *running* it. Supabase seeds its own entries for `anon` and
+`authenticated` as `supabase_admin`, so an unqualified revoke executed as anyone
+else is a **silent no-op** — and any table created later lands with full
+`anon` privileges and RLS off.
+
+The migration therefore enumerates every role owning such an entry in `public`
+and revokes explicitly `FOR ROLE` each one. If membership of that role is
+missing, the statement is skipped with a loud `WARNING` naming the exact
+remediation SQL, and `verify.sql` check 18 reports **FAIL** — the failure is
+never silent. Check 19 independently catches any table in `public` that ends up
+without RLS enabled and forced, including one created through the dashboard.
 
 ### The one exception, stated plainly
 
@@ -188,16 +202,23 @@ and can be applied one at a time instead, in filename order.
 
 ### What `verify.sql` checks
 
-Six tables exist; RLS enabled **and forced** on all six; zero policies; no
-grants to `anon` or `authenticated`; `tasks.id` is `uuid`; all 16 columns; all
-12 `CHECK` constraints by name; the partial unique index; the append-only audit
-trigger; the three `updated_at` triggers; the internal `app` schema functions;
-the seven-area vocabulary; `profiles` excluding Pong; and that no task data is
-present yet.
+**19 checks plus an overall verdict.** Six tables exist; RLS enabled **and
+forced** on all six; zero policies; `anon`/`authenticated` hold no privilege on
+any public table (via grantor-independent `has_table_privilege`, which also sees
+privileges inherited through role membership) and no catalogued grants either;
+`tasks.id` is `uuid`; all 16 columns; all 12 `CHECK` constraints by name; the
+partial unique index; **both** audit guards; the three `updated_at` triggers;
+the internal `app` schema functions; the seven-area vocabulary; `profiles`
+excluding Pong; no task data yet; **no default privileges granting `anon` or
+`authenticated`**; and **every** table in `public` — not just the six — has RLS
+enabled and forced.
 
 `supabase/tests/apply-all.test.mjs` proves the query is not merely
-rubber-stamping: it deliberately disables RLS, adds a policy, grants `anon`
-access, and drops a constraint, and asserts the report goes **FAIL** each time.
+rubber-stamping. It deliberately disables RLS, un-forces RLS, adds a policy,
+grants `anon` access directly and through an intermediary role, seeds a
+foreign-owned default privilege, creates an unprotected table, drops a
+constraint, and drops each audit guard in turn — asserting the report goes
+**FAIL** every time.
 
 ### Rollback
 

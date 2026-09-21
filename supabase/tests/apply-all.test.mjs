@@ -70,9 +70,9 @@ describe("verify.sql", () => {
     expect(rows.at(-1)).toMatchObject({ check: "OVERALL", status: "PASS" });
   });
 
-  it("covers sixteen checks plus an overall verdict", async () => {
+  it("covers nineteen checks plus an overall verdict", async () => {
     db = await freshDb();
-    expect(await runVerify(db)).toHaveLength(17);
+    expect(await runVerify(db)).toHaveLength(20);
   });
 
   it("fails loudly if RLS is switched off", async () => {
@@ -98,7 +98,81 @@ describe("verify.sql", () => {
     await db.exec("grant select on public.tasks to anon");
 
     const rows = await runVerify(db);
-    expect(rows.find((r) => r.check.includes("No grants")).status).toBe("FAIL");
+    expect(rows.find((r) => r.check.includes("hold no privilege")).status).toBe("FAIL");
+    expect(rows.find((r) => r.check.includes("No catalogued grants")).status).toBe("FAIL");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  // The privilege check reads has_table_privilege, which sees privileges held
+  // indirectly through role membership. information_schema.role_table_grants
+  // does not, so this case distinguishes the two.
+  it("fails loudly if anon inherits access through another role", async () => {
+    db = await freshDb();
+    await db.exec(`
+      create role intermediary nologin;
+      grant select on public.tasks to intermediary;
+      grant intermediary to anon;
+    `);
+
+    const rows = await runVerify(db);
+    expect(rows.find((r) => r.check.includes("hold no privilege")).status).toBe("FAIL");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("fails loudly if a default privilege grants anon on future tables", async () => {
+    db = await freshDb();
+    await db.exec("create role seeding_admin superuser");
+    await db.exec(
+      "alter default privileges for role seeding_admin in schema public grant all on tables to anon",
+    );
+
+    const rows = await runVerify(db);
+    const check = rows.find((r) => r.check.includes("No default privileges"));
+    expect(check.status).toBe("FAIL");
+    expect(check.detail).toContain("seeding_admin");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("fails loudly if a table appears in public without RLS", async () => {
+    db = await freshDb();
+    await db.exec("create table public.added_via_dashboard (id int)");
+
+    const rows = await runVerify(db);
+    const check = rows.find((r) => r.check.includes("EVERY table"));
+    expect(check.status).toBe("FAIL");
+    expect(check.detail).toContain("added_via_dashboard");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("fails loudly if a table has RLS enabled but not forced", async () => {
+    db = await freshDb();
+    await db.exec("alter table public.tasks no force row level security");
+
+    const rows = await runVerify(db);
+    expect(rows.find((r) => r.check.includes("RLS FORCED")).status).toBe("FAIL");
+    expect(rows.find((r) => r.check.includes("EVERY table")).detail).toContain("tasks");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("fails loudly if the audit truncate guard is dropped", async () => {
+    db = await freshDb();
+    await db.exec("drop trigger audit_log_no_truncate on public.audit_log");
+
+    const rows = await runVerify(db);
+    const check = rows.find((r) => r.check.includes("audit_log guards"));
+    expect(check.status).toBe("FAIL");
+    expect(check.detail).toContain("audit_log_no_truncate");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("fails loudly if the append-only guard is dropped", async () => {
+    db = await freshDb();
+    await db.exec("drop trigger audit_log_append_only on public.audit_log");
+
+    const rows = await runVerify(db);
+    const check = rows.find((r) => r.check.includes("audit_log guards"));
+    expect(check.status).toBe("FAIL");
+    expect(check.detail).toContain("audit_log_append_only");
     expect(rows.at(-1).status).toBe("FAIL");
   });
 

@@ -39,28 +39,49 @@ results(ord, check_name, status, detail) as (
   from pg_policies where schemaname = 'public'
 
   union all
-  select 5, 'No grants to anon or authenticated',
+  -- has_table_privilege is grantor-independent and covers privileges held
+  -- indirectly through role membership, which information_schema.role_table_grants
+  -- does not show unless the grantee role is currently enabled.
+  select 5, 'anon and authenticated hold no privilege on any public table',
+    case when count(*) = 0 then 'PASS' else 'FAIL' end,
+    coalesce(string_agg(format('%s on %s', who, relname), ', '), 'none — correct')
+  from (
+    select r.rolname as who, c.relname
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    cross join pg_roles r
+    where n.nspname = 'public'
+      and c.relkind in ('r', 'p', 'v', 'm', 'f')
+      and r.rolname in ('anon', 'authenticated')
+      and has_table_privilege(
+            r.oid, c.oid,
+            'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+  ) held
+
+  union all
+  -- Kept alongside as a second, independent reading of the same property.
+  select 6, 'No catalogued grants to anon or authenticated',
     case when count(*) = 0 then 'PASS' else 'FAIL' end,
     coalesce(string_agg(distinct grantee || ':' || table_name, ', '), 'none — correct')
   from information_schema.role_table_grants
   where table_schema = 'public' and grantee in ('anon', 'authenticated')
 
   union all
-  select 6, 'tasks.id is uuid (app-generated ids insert unchanged)',
+  select 7, 'tasks.id is uuid (app-generated ids insert unchanged)',
     case when count(*) = 1 then 'PASS' else 'FAIL' end,
     coalesce(max(data_type), '(missing)')
   from information_schema.columns
   where table_schema = 'public' and table_name = 'tasks' and column_name = 'id' and data_type = 'uuid'
 
   union all
-  select 7, 'tasks has all 16 columns',
+  select 8, 'tasks has all 16 columns',
     case when count(*) = 16 then 'PASS' else 'FAIL' end,
     format('%s columns', count(*))
   from information_schema.columns
   where table_schema = 'public' and table_name = 'tasks'
 
   union all
-  select 8, 'Sharing invariant constraint present',
+  select 9, 'Sharing invariant constraint present',
     case when count(*) = 1 then 'PASS' else 'FAIL' end,
     coalesce(max(conname), '(missing)')
   from pg_constraint
@@ -68,7 +89,7 @@ results(ord, check_name, status, detail) as (
 
   union all
   -- Named rather than counted, so a missing constraint is reported by name.
-  select 9, 'All 12 tasks CHECK constraints present',
+  select 10, 'All 12 tasks CHECK constraints present',
     case when count(*) = 12 then 'PASS' else 'FAIL' end,
     case when count(*) = 12 then '12 of 12'
          else 'missing: ' || (
@@ -97,42 +118,55 @@ results(ord, check_name, status, detail) as (
   where c2.conrelid = 'public.tasks'::regclass and c2.contype = 'c'
 
   union all
-  select 10, 'Partial unique index on (source, import_key)',
+  select 11, 'Partial unique index on (source, import_key)',
     case when count(*) = 1 then 'PASS' else 'FAIL' end,
     coalesce(max(indexname), '(missing)')
   from pg_indexes
   where schemaname = 'public' and indexname = 'tasks_source_import_key_unique'
 
   union all
-  select 11, 'audit_log append-only trigger present',
-    case when count(*) = 1 then 'PASS' else 'FAIL' end,
-    coalesce(max(tgname), '(missing)')
+  -- Both guards: the row-level one cannot fire on TRUNCATE, so the
+  -- statement-level one is what stops the log being emptied in one statement.
+  select 12, 'audit_log guards present (append-only AND no-truncate)',
+    case when count(*) = 2 then 'PASS' else 'FAIL' end,
+    case when count(*) = 2 then 'audit_log_append_only, audit_log_no_truncate'
+         else 'missing: ' || coalesce((
+           select string_agg(e.name, ', ' order by e.name)
+           from (values ('audit_log_append_only'), ('audit_log_no_truncate')) as e(name)
+           where not exists (
+             select 1 from pg_trigger g
+             where g.tgrelid = 'public.audit_log'::regclass
+               and g.tgname = e.name and not g.tgisinternal)
+         ), '(none)')
+    end
   from pg_trigger
-  where tgrelid = 'public.audit_log'::regclass and tgname = 'audit_log_append_only' and not tgisinternal
+  where tgrelid = 'public.audit_log'::regclass
+    and tgname in ('audit_log_append_only', 'audit_log_no_truncate')
+    and not tgisinternal
 
   union all
-  select 12, 'updated_at triggers present on tasks, area_notes, profiles',
+  select 13, 'updated_at triggers present on tasks, area_notes, profiles',
     case when count(*) = 3 then 'PASS' else 'FAIL' end,
     format('%s of 3', count(*))
   from pg_trigger
   where tgname like '%touch_updated_at' and not tgisinternal
 
   union all
-  select 13, 'Internal app schema and its two functions exist',
+  select 14, 'Internal app schema and its two functions exist',
     case when count(*) = 2 then 'PASS' else 'FAIL' end,
     coalesce(string_agg(p.proname, ', ' order by p.proname), '(missing)')
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
   where n.nspname = 'app' and p.proname in ('touch_updated_at', 'forbid_mutation')
 
   union all
-  select 14, 'Area vocabulary lists all seven areas',
+  select 15, 'Area vocabulary lists all seven areas',
     case when (select pg_get_constraintdef(oid) from pg_constraint where conname = 'tasks_area_valid')
               like '%inbox%school%work%reading%family%faith%home%'
          then 'PASS' else 'FAIL' end,
     coalesce((select pg_get_constraintdef(oid) from pg_constraint where conname = 'tasks_area_valid'), '(missing)')
 
   union all
-  select 15, 'profiles covers the three human roles and excludes pong',
+  select 16, 'profiles covers the three human roles and excludes pong',
     case when (select pg_get_constraintdef(oid) from pg_constraint where conname = 'profiles_role_valid')
               not like '%pong%'
          and (select pg_get_constraintdef(oid) from pg_constraint where conname = 'profiles_role_valid')
@@ -141,9 +175,31 @@ results(ord, check_name, status, detail) as (
     coalesce((select pg_get_constraintdef(oid) from pg_constraint where conname = 'profiles_role_valid'), '(missing)')
 
   union all
-  select 16, 'No task data present yet (schema only, as expected in Phase 3)',
+  select 17, 'No task data present yet (schema only, as expected in Phase 3)',
     case when (select count(*) from public.tasks) = 0 then 'PASS' else 'NOTE' end,
     format('%s task rows', (select count(*) from public.tasks))
+
+  union all
+  -- ALTER DEFAULT PRIVILEGES is scoped to the role that ran it, so an entry
+  -- owned by another role survives an unqualified revoke and silently grants
+  -- anon on every table created later.
+  select 18, 'No default privileges granting anon or authenticated in public',
+    case when count(*) = 0 then 'PASS' else 'FAIL' end,
+    coalesce(string_agg(format('%s owns %s', pg_get_userbyid(defaclrole), defaclobjtype), ', '),
+             'none — correct')
+  from pg_default_acl
+  where defaclnamespace = 'public'::regnamespace
+    and (defaclacl::text like '%anon=%' or defaclacl::text like '%authenticated=%')
+
+  union all
+  -- Catches a table created outside these migrations — via the dashboard, or by
+  -- a later phase — that would otherwise sit in public with RLS off.
+  select 19, 'EVERY table in public has RLS enabled and forced (not just the six)',
+    case when count(*) = 0 then 'PASS' else 'FAIL' end,
+    coalesce(string_agg(c.relname, ', ' order by c.relname), 'none unprotected — correct')
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind in ('r', 'p')
+    and (not c.relrowsecurity or not c.relforcerowsecurity)
 )
 
 select ord as "#", check_name as "check", status, detail from results
