@@ -252,7 +252,7 @@ function TaskRow({ task, area, now, onToggle, onDelete, onEdit, onMove }) {
         type="button"
         onClick={onDelete}
         aria-label={`Delete "${task.title}"`}
-        className={`opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-zinc-600 hover:text-red-400 text-xs transition-opacity flex-shrink-0 rounded ${FOCUS}`}
+        className={`opacity-60 md:opacity-0 md:group-hover:opacity-100 focus-visible:opacity-100 text-zinc-500 hover:text-red-400 text-xs transition-opacity flex-shrink-0 rounded px-1 py-0.5 ${FOCUS}`}
       >
         ✕
       </button>
@@ -509,7 +509,7 @@ function AccountabilityView({ tasks, note, now }) {
 
 // ─── BACKUP CONTROLS ──────────────────────────────────────────────────────────
 
-function BackupControls({ state, onRestore }) {
+function BackupControls({ state, onPickBackup }) {
   const inputRef = useRef(null);
 
   function download() {
@@ -518,14 +518,20 @@ function BackupControls({ state, onRestore }) {
     const link = document.createElement("a");
     link.href = url;
     link.download = `fon-os-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    link.rel = "noopener";
+    // iOS Safari ignores a click on an anchor that is not in the document, and
+    // revoking the object URL synchronously cancels the download in flight.
+    link.style.display = "none";
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
   }
 
   function upload(event) {
     const file = event.target.files?.[0];
     if (!file) return;
-    file.text().then(onRestore);
+    file.text().then(onPickBackup);
     event.target.value = "";
   }
 
@@ -543,6 +549,124 @@ function BackupControls({ state, onRestore }) {
         Restore backup
       </button>
       <input ref={inputRef} type="file" accept="application/json,.json" onChange={upload} className="sr-only" tabIndex={-1} />
+    </div>
+  );
+}
+
+/** Restoring replaces the whole board, so it asks first and says what it will do. */
+function RestoreConfirm({ current, incoming, onConfirm, onCancel }) {
+  return (
+    <div
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="restore-title"
+      className="mx-auto mt-4 max-w-md rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-3 text-xs text-amber-100"
+    >
+      <h2 id="restore-title" className="font-bold mb-2">Replace the current board?</h2>
+      <p className="mb-2">
+        This replaces all {current.tasks.length} tasks currently on the board with the{" "}
+        {incoming.tasks.length} tasks in the backup file.
+      </p>
+      <p className="mb-3 text-amber-200/70">
+        The board you are replacing is saved first, so this can be undone.
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={onConfirm}
+          className={`rounded bg-amber-900 px-3 py-1 font-bold text-amber-100 hover:bg-amber-800 ${FOCUS}`}
+        >
+          Replace board
+        </button>
+        <button type="button" onClick={onCancel} className={`rounded px-3 py-1 text-amber-200/70 hover:text-amber-100 ${FOCUS}`}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shown instead of the board when the saved data cannot be parsed. The real
+ * data is still on disk and stays there until "Discard and start fresh".
+ * Showing the seed board here would be a lie, and the first edit would
+ * overwrite whatever was actually stored.
+ */
+function RecoveryScreen({ corruptRaw, onDiscard }) {
+  const [confirming, setConfirming] = useState(false);
+
+  function downloadRaw() {
+    const blob = new Blob([corruptRaw ?? ""], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `fon-os-unreadable-${new Date().toISOString().slice(0, 10)}.json`;
+    link.rel = "noopener";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
+
+  return (
+    <div className="mx-auto max-w-lg space-y-4 py-8">
+      <div className="rounded-xl border border-red-800 bg-red-950/40 p-5 text-xs text-red-100">
+        <h2 className="mb-2 text-sm font-bold text-red-300">Saved board could not be read</h2>
+        <p className="mb-2">
+          The data stored in this browser is not valid and could not be loaded. It has{" "}
+          <strong>not</strong> been changed or deleted, and the board is read-only so nothing can
+          overwrite it.
+        </p>
+        <p className="mb-4 text-red-200/70">
+          Download the raw data first — it may still be repairable, or contain tasks worth copying
+          out by hand.
+        </p>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={downloadRaw}
+            className={`rounded bg-zinc-800 px-3 py-1.5 font-bold text-zinc-100 hover:bg-zinc-700 ${FOCUS}`}
+          >
+            Download raw data
+          </button>
+
+          {confirming ? (
+            <>
+              <button
+                type="button"
+                onClick={onDiscard}
+                className={`rounded bg-red-900 px-3 py-1.5 font-bold text-red-100 hover:bg-red-800 ${FOCUS}`}
+              >
+                Yes, discard and start fresh
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                className={`rounded px-3 py-1.5 text-red-200/70 hover:text-red-100 ${FOCUS}`}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className={`rounded border border-red-800 px-3 py-1.5 text-red-200 hover:bg-red-900/40 ${FOCUS}`}
+            >
+              Discard and start fresh
+            </button>
+          )}
+        </div>
+
+        {confirming && (
+          <p className="mt-3 text-red-200/70">
+            The unreadable data is moved aside under a timestamped key rather than deleted, and a
+            fresh board is started.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -569,6 +693,12 @@ function Banner({ tone, children, onDismiss }) {
 export default function App() {
   const store = useTaskStore();
   const [view, setView] = useState("dashboard"); // "dashboard" | "accountability"
+  const [pendingRestore, setPendingRestore] = useState(null);
+
+  function onPickBackup(json) {
+    const prepared = store.prepareRestore(json);
+    if (prepared) setPendingRestore(prepared);
+  }
 
   // One clock for the whole render pass, so every overdue check agrees.
   const now = new Date();
@@ -579,13 +709,14 @@ export default function App() {
     }`;
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-mono">
+    <div className="app-shell min-h-screen bg-zinc-950 text-zinc-100 font-mono">
       {/* Top bar */}
       <header className="border-b border-zinc-800 px-4 md:px-8 py-4 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <span className="text-zinc-100 font-bold tracking-tight">Fon&rsquo;s OS</span>
           <span className="text-zinc-600 text-xs ml-3 hidden md:inline">Personal command center</span>
         </div>
+        {!store.readOnly && (
         <nav className="flex gap-2 flex-shrink-0" aria-label="Views">
           <button type="button" onClick={() => setView("dashboard")} aria-current={view === "dashboard"} className={tabClass(view === "dashboard")}>
             My View
@@ -594,13 +725,30 @@ export default function App() {
             Accountability View
           </button>
         </nav>
+        )}
       </header>
 
       {store.notice && <Banner tone="info" onDismiss={store.dismissNotice}>{store.notice}</Banner>}
-      {store.error && <Banner tone="error" onDismiss={store.dismissError}>{store.error}</Banner>}
+      {store.error && !store.readOnly && <Banner tone="error" onDismiss={store.dismissError}>{store.error}</Banner>}
+
+      {store.undo && (
+        <div role="status" className="mx-4 md:mx-8 mt-4 flex items-center gap-3 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-xs text-zinc-300">
+          <p className="flex-1">
+            Deleted &ldquo;{store.undo.task.title}&rdquo;.
+          </p>
+          <button type="button" onClick={store.undoRemove} className={`flex-shrink-0 rounded bg-zinc-700 px-3 py-1 font-bold text-zinc-100 hover:bg-zinc-600 ${FOCUS}`}>
+            Undo
+          </button>
+          <button type="button" onClick={store.dismissUndo} aria-label="Dismiss" className={`flex-shrink-0 opacity-60 hover:opacity-100 rounded ${FOCUS}`}>
+            ✕
+          </button>
+        </div>
+      )}
 
       <main className="px-4 md:px-8 py-6">
-        {store.phase === "loading" || store.state === null ? (
+        {store.readOnly ? (
+          <RecoveryScreen corruptRaw={store.corruptRaw} onDiscard={store.discardCorrupt} />
+        ) : store.phase === "loading" || store.state === null ? (
           <p className="text-center text-zinc-600 text-xs py-12" role="status">Loading your board…</p>
         ) : view === "dashboard" ? (
           <>
@@ -620,8 +768,19 @@ export default function App() {
               Click any item to edit · hover to delete · click status note to update it
             </p>
             <div className="mt-3">
-              <BackupControls state={store.state} onRestore={store.restore} />
+              <BackupControls state={store.state} onPickBackup={onPickBackup} />
             </div>
+            {pendingRestore && (
+              <RestoreConfirm
+                current={store.state}
+                incoming={pendingRestore}
+                onConfirm={() => {
+                  store.confirmRestore(pendingRestore);
+                  setPendingRestore(null);
+                }}
+                onCancel={() => setPendingRestore(null)}
+              />
+            )}
           </>
         ) : (
           <AccountabilityView

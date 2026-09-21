@@ -17,7 +17,7 @@ the board into a single task array. Migration is a copy, not a reshape.
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | `uuid` pk | |
+| `id` | `uuid` pk | Already satisfied client-side: every id the app produces is a v4 UUID, so the copy needs no id rewrite. |
 | `title` | `text not null` | |
 | `notes` | `text not null default ''` | |
 | `area` | `text not null` | `check (area in ('inbox','school','work','reading','family','faith','home'))` |
@@ -57,6 +57,10 @@ constraint shared_only_in_shared_areas
 Phase 2 data lives in the browser. The path in is: **Export backup** in My View
 → a one-shot importer loads that JSON into Supabase → the app switches its
 read path from `localStorage` to Supabase.
+
+The export is already insert-ready: ids are v4 UUIDs, ids are unique (collisions
+are re-keyed on load, never dropped), and `visibility` already satisfies the
+`shared_only_in_shared_areas` constraint above.
 
 Rollback is the reverse and stays available because `src/lib/storage.js` is
 untouched: point the app back at local storage and re-import the export file.

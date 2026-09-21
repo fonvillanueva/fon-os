@@ -1,10 +1,21 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { applyPatch, createTask, moveTask as moveTaskTo, toggleDone } from "./model.js";
-import { importState, readState, writeState } from "./storage.js";
+import {
+  STORAGE_KEY,
+  discardCorruptState,
+  importState,
+  peekState,
+  readState,
+  savePreRestoreBackup,
+  writeState,
+} from "./storage.js";
 
 const MIGRATION_NOTICE =
   "Your tasks were moved from temporary session storage to permanent storage on this device. They will no longer disappear when you close the tab.";
+
+const COEXIST_NOTICE =
+  "An older session-storage board was also found on this device. It has not been merged, and a copy is saved under fon_os_backup_v1.";
 
 /**
  * Owns the board.
@@ -14,18 +25,26 @@ const MIGRATION_NOTICE =
  * effect, because saving is a consequence of the user's action, not of
  * rendering. `stateRef` mirrors `state` so the updater stays pure.
  *
- * `phase` is the seam Phase 3 needs: when the board comes from Supabase instead
- * of localStorage, the initial value becomes "loading" and nothing else here or
- * in the UI has to change shape.
+ * Two safety properties are enforced here rather than in the UI:
+ *
+ *  - When the saved board is unreadable, `readOnly` is set and every mutation
+ *    is refused. The bytes on disk survive until the user discards them.
+ *  - A write by another tab arrives as a `storage` event and is adopted, so two
+ *    open tabs cannot overwrite each other from stale in-memory state.
  */
 export function useTaskStore() {
-  // Lazy initialiser: readState() runs exactly once, before the first paint.
   const [boot] = useState(readState);
 
   const stateRef = useRef(boot.state);
   const [state, setState] = useState(boot.state);
   const [error, setError] = useState(boot.error);
-  const [notice, setNotice] = useState(boot.migrated ? MIGRATION_NOTICE : null);
+  const [readOnly, setReadOnly] = useState(boot.status === "corrupt");
+  const [undo, setUndo] = useState(null);
+  const [notice, setNotice] = useState(() => {
+    if (boot.migrated) return MIGRATION_NOTICE;
+    if (boot.legacyCoexists) return COEXIST_NOTICE;
+    return null;
+  });
 
   const phase = state === null ? "loading" : "ready";
 
@@ -35,13 +54,33 @@ export function useTaskStore() {
     setError(writeState(next));
   }, []);
 
+  // Adopt writes made by another tab instead of clobbering them on the next edit.
+  useEffect(() => {
+    if (readOnly) return undefined;
+
+    function onStorage(event) {
+      if (event.key !== null && event.key !== STORAGE_KEY) return;
+      const incoming = peekState();
+      if (!incoming) return;
+      stateRef.current = incoming;
+      setState(incoming);
+    }
+
+    globalThis.addEventListener?.("storage", onStorage);
+    return () => globalThis.removeEventListener?.("storage", onStorage);
+  }, [readOnly]);
+
   const mutate = useCallback(
     (fn) => {
+      if (readOnly) {
+        setError("The board is read-only until you decide what to do with the unreadable saved data.");
+        return;
+      }
       const prev = stateRef.current;
       if (prev === null) return;
       commit(fn(prev));
     },
-    [commit],
+    [commit, readOnly],
   );
 
   const mapTask = useCallback(
@@ -59,10 +98,32 @@ export function useTaskStore() {
   const toggleTask = useCallback((id) => mapTask(id, toggleDone), [mapTask]);
   const moveTask = useCallback((id, areaId) => mapTask(id, (t) => moveTaskTo(t, areaId)), [mapTask]);
 
+  /** Deletes are reversible: the row and its position are held for undo. */
   const removeTask = useCallback(
-    (id) => mutate((prev) => ({ ...prev, tasks: prev.tasks.filter((t) => t.id !== id) })),
-    [mutate],
+    (id) => {
+      const prev = stateRef.current;
+      if (readOnly || prev === null) {
+        if (readOnly) setError("The board is read-only until you decide what to do with the unreadable saved data.");
+        return;
+      }
+      const index = prev.tasks.findIndex((t) => t.id === id);
+      if (index === -1) return;
+      setUndo({ task: prev.tasks[index], index });
+      commit({ ...prev, tasks: prev.tasks.filter((t) => t.id !== id) });
+    },
+    [commit, readOnly],
   );
+
+  const undoRemove = useCallback(() => {
+    const prev = stateRef.current;
+    if (!undo || prev === null) return;
+    const tasks = [...prev.tasks];
+    tasks.splice(Math.min(undo.index, tasks.length), 0, undo.task);
+    commit({ ...prev, tasks });
+    setUndo(null);
+  }, [commit, undo]);
+
+  const dismissUndo = useCallback(() => setUndo(null), []);
 
   const setAreaNote = useCallback(
     (areaId, note) =>
@@ -70,19 +131,43 @@ export function useTaskStore() {
     [mutate],
   );
 
-  const restore = useCallback(
-    (json) => {
-      const result = importState(json);
-      if (result.error) {
-        setError(result.error);
-        return false;
-      }
-      commit(result.state);
-      setNotice(`Restored ${result.state.tasks.length} tasks from backup.`);
+  /** Parses and validates a backup without applying it, for the confirm step. */
+  const prepareRestore = useCallback((json) => {
+    const result = importState(json);
+    if (result.error) {
+      setError(result.error);
+      return null;
+    }
+    return result.state;
+  }, []);
+
+  /** Applies a prepared restore, saving the outgoing board first. */
+  const confirmRestore = useCallback(
+    (next) => {
+      if (readOnly || !next) return false;
+      const outgoing = stateRef.current;
+      const backedUp = outgoing ? savePreRestoreBackup(outgoing) : false;
+      commit(next);
+      setUndo(null);
+      setNotice(
+        backedUp
+          ? `Restored ${next.tasks.length} tasks. The board you replaced was saved to fon_os_prerestore_backup.`
+          : `Restored ${next.tasks.length} tasks. The previous board could not be backed up first.`,
+      );
       return true;
     },
-    [commit],
+    [commit, readOnly],
   );
+
+  /** Moves unreadable data to a quarantine key and starts from the seed. */
+  const discardCorrupt = useCallback(() => {
+    const fresh = discardCorruptState(boot.corruptRaw);
+    stateRef.current = fresh;
+    setState(fresh);
+    setReadOnly(false);
+    setError(null);
+    setNotice("The unreadable board was set aside and a fresh board was started.");
+  }, [boot.corruptRaw]);
 
   const dismissNotice = useCallback(() => setNotice(null), []);
   const dismissError = useCallback(() => setError(null), []);
@@ -92,6 +177,9 @@ export function useTaskStore() {
     phase,
     error,
     notice,
+    readOnly,
+    corruptRaw: boot.corruptRaw,
+    undo,
     dismissNotice,
     dismissError,
     addTask,
@@ -99,7 +187,11 @@ export function useTaskStore() {
     toggleTask,
     moveTask,
     removeTask,
+    undoRemove,
+    dismissUndo,
     setAreaNote,
-    restore,
+    prepareRestore,
+    confirmRestore,
+    discardCorrupt,
   };
 }

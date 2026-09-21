@@ -13,12 +13,39 @@ export const VISIBILITIES = ["private", "shared"];
 export const SOURCES = ["manual", "pong-voice", "claude-import", "abigail"];
 export const ACTORS = ["fon", "abigail", "pong", "claude-import"];
 
+/**
+ * RFC 4122 version 4. Every id the app produces must satisfy this, because the
+ * Phase 3 Supabase `tasks.id` column is `uuid` and would reject anything else.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isUuid(value) {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+function formatUuid(bytes) {
+  // Set the version (4) and variant (10xx) bits.
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Always returns a valid v4 UUID. The fallbacks matter: `crypto.randomUUID` is
+ * unavailable in non-secure contexts and in older Safari, and the previous
+ * fallback returned a `t_…` string that Postgres would have rejected.
+ */
 export function uid() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
+  if (typeof crypto !== "undefined") {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    if (typeof crypto.getRandomValues === "function") {
+      return formatUuid(crypto.getRandomValues(new Uint8Array(16)));
+    }
   }
-  // Collision-resistant fallback for older Safari and non-secure contexts.
-  return `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  return formatUuid(bytes);
 }
 
 function oneOf(value, allowed, fallback) {
@@ -68,7 +95,7 @@ export function normalizeTask(raw, { now = new Date().toISOString() } = {}) {
     : "private";
 
   return {
-    id: typeof input.id === "string" && input.id ? input.id : uid(),
+    id: isUuid(input.id) ? input.id : uid(),
     title,
     notes: typeof input.notes === "string" ? input.notes : "",
     area,

@@ -32,6 +32,10 @@ table — so moving to a database is a copy rather than a reshape. `src/lib/mode
 defines and normalises the task; nothing downstream has to defend against a
 missing field.
 
+Task ids are **v4 UUIDs**, including in the seed and in the no-Web-Crypto
+fallback, so the board is already compatible with the Phase 3
+`tasks.id uuid` column and no id is rewritten on first save.
+
 ### Storage migration (automatic, already applied)
 
 The original build stored the board in **`sessionStorage`**, which meant every
@@ -42,15 +46,45 @@ task was destroyed when the tab closed. On first load, the app now:
    saves it to `localStorage`, showing a one-time notice, otherwise
 3. Falls back to the seed board.
 
-The legacy key is **not deleted**, and a verbatim copy of the pre-migration
-payload is kept at `localStorage["fon_os_backup_v1"]`.
+The legacy key is **not deleted**, and a verbatim copy of it is kept at
+`localStorage["fon_os_backup_v1"]` — taken **whenever legacy data is present**,
+not only when migrating, so a second tab that already migrated cannot leave it
+unreferenced. If a legacy board and a migrated board coexist, the app says so
+and does not merge them.
 
-If saved data is unreadable, the app says so and **refuses to overwrite it**.
+Legacy ids are re-keyed to UUIDs during migration. **Colliding ids are re-keyed,
+never dropped** — two legacy buckets could each hold an item called `s1`, and
+collapsing them would silently lose a real task.
+
+### If the saved board cannot be read
+
+The app enters a **read-only safety state**: the recovery screen replaces the
+board, the view switcher is hidden, and every mutation is refused at the store,
+not just hidden in the UI. Your stored bytes are never written over.
+
+From there you can **Download raw data** — it may be repairable, or contain
+tasks worth copying out by hand — and only an explicit, twice-confirmed
+**Discard and start fresh** moves on. Even then the original is *moved aside*
+under a timestamped `fon_os_unreadable_v2_…` key rather than deleted.
+
+### Multiple tabs
+
+Each tab listens for `storage` events and adopts a board saved by another tab,
+so two open tabs cannot overwrite each other from stale in-memory state.
 
 ## Backup and rollback
 
 **Export backup** at the bottom of My View downloads the whole board as JSON.
-**Restore backup** loads one back. Do an export before any migration.
+Do an export before any migration.
+
+**Restore backup** asks first: it shows how many tasks are on the board and how
+many are in the file, and saves the board you are replacing to
+`localStorage["fon_os_prerestore_backup"]` before applying anything — so a
+restore is itself reversible.
+
+**Deleting a task** shows an *Undo* banner that puts the row back at its
+original position. The delete control stays visible on touch devices, where
+there is no hover to reveal it.
 
 To roll back to the pre-change app entirely:
 
@@ -59,9 +93,10 @@ git revert <merge-or-commit-sha>    # or: git checkout main -- .
 npm ci && npm run build
 ```
 
-Old data is still in `sessionStorage["fon_dashboard"]` (same tab) and in
-`localStorage["fon_os_backup_v1"]`, so reverting the code does not cost you the
-board. Reverting does, however, return you to the sessionStorage behaviour where
+Old data is still in `sessionStorage["fon_dashboard"]` (same tab), in
+`localStorage["fon_os_backup_v1"]`, and — after any restore — in
+`localStorage["fon_os_prerestore_backup"]`, so reverting the code does not cost
+you the board. Reverting does, however, return you to the sessionStorage behaviour where
 tasks vanish when the tab closes — export first.
 
 ## Icons and PWA

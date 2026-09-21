@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyPatch,
@@ -6,6 +6,7 @@ import {
   createTask,
   formatDue,
   isOverdue,
+  isUuid,
   moveTask,
   normalizeTask,
   pct,
@@ -18,7 +19,6 @@ describe("normalizeTask", () => {
     const task = normalizeTask({ id: "s1", text: "Read chapter 4", done: true, priority: "!", dueDate: "2026-01-02", area: "school" });
 
     expect(task).toMatchObject({
-      id: "s1",
       title: "Read chapter 4",
       status: "done",
       priority: "!",
@@ -26,6 +26,8 @@ describe("normalizeTask", () => {
       area: "school",
     });
     expect(task.completedAt).not.toBeNull();
+    // The legacy "s1" id is re-keyed — see "normalizeTask ids (M5)".
+    expect(isUuid(task.id)).toBe(true);
   });
 
   it("files an unknown or missing area into Inbox instead of dropping the task", () => {
@@ -213,9 +215,60 @@ describe("formatDue", () => {
   });
 });
 
-describe("uid", () => {
+describe("uid (M5)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("does not collide across a large batch", () => {
     const ids = new Set(Array.from({ length: 2000 }, uid));
     expect(ids.size).toBe(2000);
+  });
+
+  it("produces a valid v4 UUID", () => {
+    expect(isUuid(uid())).toBe(true);
+  });
+
+  // The Supabase `tasks.id` column is `uuid`; the old fallback emitted `t_…`,
+  // which Postgres would have rejected on insert.
+  it("still produces a valid UUID without crypto.randomUUID", () => {
+    vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
+    const ids = Array.from({ length: 200 }, uid);
+    expect(ids.every(isUuid)).toBe(true);
+    expect(new Set(ids).size).toBe(200);
+  });
+
+  it("still produces a valid UUID with no Web Crypto at all", () => {
+    vi.stubGlobal("crypto", undefined);
+    const ids = Array.from({ length: 200 }, uid);
+    expect(ids.every(isUuid)).toBe(true);
+    expect(new Set(ids).size).toBe(200);
+  });
+});
+
+describe("isUuid", () => {
+  it("accepts a v4 UUID and rejects legacy ids", () => {
+    expect(isUuid("3f1a6c2e-8b55-4a71-9d44-0c2e17ab9f10")).toBe(true);
+    for (const bad of ["s1", "h1", "", null, undefined, "t_abc_def", "3f1a6c2e8b554a719d440c2e17ab9f10"]) {
+      expect(isUuid(bad)).toBe(false);
+    }
+  });
+});
+
+describe("normalizeTask ids (M5)", () => {
+  it("replaces a legacy string id with a fresh UUID", () => {
+    expect(isUuid(normalizeTask({ id: "s1", title: "x", area: "school" }).id)).toBe(true);
+  });
+
+  it("preserves an id that is already a UUID", () => {
+    const id = "3f1a6c2e-8b55-4a71-9d44-0c2e17ab9f10";
+    expect(normalizeTask({ id, title: "x", area: "school" }).id).toBe(id);
+  });
+
+  it("keeps the id stable through edits, so it never churns on save", () => {
+    const task = createTask({ title: "x", area: "school" });
+    expect(applyPatch(task, { title: "y" }).id).toBe(task.id);
+    expect(toggleDone(task).id).toBe(task.id);
+    expect(moveTask(task, "work").id).toBe(task.id);
   });
 });
