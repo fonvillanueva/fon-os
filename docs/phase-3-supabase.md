@@ -9,12 +9,20 @@ Phase 4 (authentication and policies) and Phase 5 (the Pong API) are designed in
 
 ---
 
-## Status: project created; the schema must be applied by hand
+## Status: applied and verified ✅
 
-The Free-plan project exists. The migrations, tests, import tooling and
-verification query are complete and pass offline against a real Postgres.
+The Free-plan project exists and **the schema is applied**. `verify.sql`
+reports **OVERALL PASS — 16 passed, 0 failed**, with 0 task rows as expected
+for Phase 3. The captured result is recorded in
+[`phase-3-verification.md`](phase-3-verification.md).
 
-**I cannot apply the schema from this session**, for two independent reasons:
+The live app is still untouched: nothing connects to this database, and the
+production bundle is byte-identical to `main`.
+
+### Why Fon applied it rather than this session
+
+**The schema could not be applied from this session**, for two independent
+reasons:
 
 1. **Network.** This environment's egress policy blocks `*.supabase.co` and
    `api.supabase.com` (HTTP 403 at the proxy). I cannot reach the project at
@@ -25,8 +33,9 @@ verification query are complete and pass offline against a real Postgres.
    are secrets that should not be handed to this session, and neither of which
    was requested.
 
-So applying the schema is a two-paste job for Fon. It takes about a minute:
-see [Applying the schema](#applying-the-schema) below.
+So it was a two-paste job for Fon — about a minute — using the files described
+in [Applying the schema](#applying-the-schema) below. Those files remain the
+way to rebuild this database, or to stand up a fresh one.
 
 ---
 
@@ -275,8 +284,11 @@ more so. Nothing in Phase 3 removes or weakens it.
 
 ## What I need from you
 
-Run the two pastes in [Applying the schema](#applying-the-schema), then send
-back the `verify.sql` result table. That is the whole ask.
+Nothing further for Phase 3 — it is applied and verified.
+
+One **optional** 30-second check would close the last verification gap: a live
+request proving the publishable key is refused by the real project. The command
+is in [`phase-3-verification.md`](phase-3-verification.md#not-yet-proven-anywhere-runtime-denial-on-the-hosted-project).
 
 If any screen offers a paid add-on, a larger compute size, a custom domain, or
 asks for a card — **stop and tell me** rather than accepting. Nothing in this
