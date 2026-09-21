@@ -11,6 +11,9 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test/setup.js'],
-    include: ['src/**/*.test.{js,jsx}'],
+    include: ['src/**/*.test.{js,jsx}', 'supabase/**/*.test.mjs'],
+    // The Supabase tests boot a real Postgres (PGlite/WASM) per case.
+    testTimeout: 30000,
+    hookTimeout: 30000,
   },
 })

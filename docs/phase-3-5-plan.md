@@ -6,6 +6,20 @@ down first so the security model can be reviewed before any of it exists.
 Decisions already made: **Supabase** (Postgres + Auth + Row Level Security), with
 authorization enforced in the database rather than in the UI.
 
+> **Phase 3 is now built.** The schema, migrations, RLS posture and import path
+> as actually implemented are documented in
+> [`phase-3-supabase.md`](phase-3-supabase.md), which supersedes the Phase 3
+> sketch below wherever the two differ. Phases 4 and 5 remain unbuilt design.
+>
+> Two things changed on contact with the code:
+>
+> - `completed_at` is constrained with a `CASE` rather than a biconditional, so
+>   an unknown status reports the status constraint instead of the completion
+>   one, and an archived task may keep its completion time.
+> - `profiles` covers only the three *human* roles. Pong gets no auth user and
+>   no profile row: it authenticates to our own API in Phase 5 and appears in
+>   the database only as an attribution value.
+
 ---
 
 ## Phase 3 — Database
@@ -61,6 +75,9 @@ read path from `localStorage` to Supabase.
 The export is already insert-ready: ids are v4 UUIDs, ids are unique (collisions
 are re-keyed on load, never dropped), and `visibility` already satisfies the
 `shared_only_in_shared_areas` constraint above.
+
+Built in Phase 3: `supabase/import/generate-sql.mjs` turns an export into an
+idempotent, insert-and-update-only script. See `phase-3-supabase.md`.
 
 Rollback is the reverse and stays available because `src/lib/storage.js` is
 untouched: point the app back at local storage and re-import the export file.

@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "icons": "node scripts/generate-icons.mjs"
+    "icons": "node scripts/generate-icons.mjs",
+    "db:import-sql": "node supabase/import/generate-sql.mjs",
+    "db:build-apply-all": "node scripts/build-apply-all.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.1",
@@ -19,6 +21,7 @@
     "tailwindcss": "^4.3.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@eslint/js": "^10.0.1",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",

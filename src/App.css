@@ -1,6 +1,17 @@
 @import "tailwindcss";
 
 /*
+ * Tailwind scans the whole project for class names. Without this exclusion it
+ * finds ordinary English and SQL in the database migrations — "contents",
+ * "truncate", "lowercase" — and emits rules for classes no element uses.
+ *
+ * Only supabase/ is excluded, deliberately: docs/ and scripts/ were already
+ * being scanned before Phase 3, and excluding them too would change the
+ * shipped CSS. This keeps the built stylesheet byte-identical to main.
+ */
+@source not "../supabase";
+
+/*
  * iOS standalone (Add to Home Screen) draws under the status bar and the
  * Dynamic Island because index.html sets `viewport-fit=cover` and a
  * translucent status bar. These insets keep content clear of both, and of the
