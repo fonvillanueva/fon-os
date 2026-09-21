@@ -327,3 +327,56 @@ Two tests enforce it:
   scans the migration files and fails if a created table is not listed.
 - `migrations.test.mjs`, "ends with RLS enabled, forced, and no api-role
   privileges on all of them" — asserts the end state for every table.
+
+---
+
+## Execution roles — recorded 2026-09-21
+
+Read-only `pg_roles` query against the hosted project:
+
+| rolname | `rolbypassrls` | `rolsuper` | `rolcanlogin` |
+|---|---|---|---|
+| `anon` | false | false | false |
+| `authenticated` | false | false | false |
+| `authenticator` | false | false | **true** |
+| `postgres` | **true** | false | true |
+| `service_role` | **true** | false | false |
+| `supabase_admin` | true | **true** | true |
+
+### The import path is ready
+
+`postgres` holds `BYPASSRLS`, and the SQL Editor runs as `postgres`. The
+documented route — generate `import.sql`, review it, paste it into the SQL
+Editor — passes the preflight and works. `service_role` also qualifies, for a
+server-side import in Phase 4.
+
+### No API-facing role can bypass RLS
+
+Worth stating because it is the load-bearing half of the security posture:
+
+- `anon` and `authenticated` are `rolbypassrls = false` **and**
+  `rolcanlogin = false`. They are not logged into directly; PostgREST logs in
+  as `authenticator` and switches to them per request.
+- `authenticator` is itself `rolbypassrls = false`, so nothing reached through
+  the public API can bypass row level security.
+
+Combined with zero policies and the revoked grants, a request carrying the
+publishable key reaches no row.
+
+### An honest limit of FORCE RLS here
+
+The six tables were created by `postgres`, so `postgres` owns them — and
+`postgres` holds `BYPASSRLS`. **`FORCE` therefore adds no protection against
+the SQL Editor**, which can read and write everything regardless. That is
+expected of an admin console, but it should not be mistaken for a boundary.
+
+`FORCE` still earns its place:
+
+- it constrains any future table owned by a role without `BYPASSRLS`;
+- it holds if `BYPASSRLS` is ever removed from `postgres`;
+- it is what makes the import preflight necessary and meaningful, which is how
+  the wrong-role case was caught at all.
+
+The boundary that actually protects the board from the internet is RLS with
+zero policies plus revoked grants, against roles that provably cannot bypass
+it — the second table above.

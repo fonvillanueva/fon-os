@@ -276,12 +276,19 @@ The generated script therefore opens with a **preflight** that checks
 `insufficient_privilege` with a role-shaped message before writing anything. A
 refused run leaves **zero** rows and zero import batches — tested.
 
-**This is why the import path is not yet declared ready.** Whether the Supabase
-SQL Editor's role carries `BYPASSRLS` on this project has not been confirmed,
-and it is a one-line read-only query to settle. Until it is, the documented
-route is: run the import as a role known to hold `BYPASSRLS`. If the SQL Editor
-role does not, the alternatives are `psql` as a `BYPASSRLS` role, or a
-server-side import in Phase 4 using the service-role key.
+**Confirmed on this project (2026-09-21):** `postgres` holds `BYPASSRLS`, and
+the SQL Editor runs as `postgres` — so pasting `import.sql` into the SQL Editor
+works and passes the preflight. `service_role` also qualifies, for a
+server-side import in Phase 4. Full role table in
+[`phase-3-verification.md`](phase-3-verification.md#execution-roles--recorded-2026-09-21).
+
+Note what that implies: because `postgres` both owns the tables and bypasses
+RLS, `FORCE` adds no protection against the SQL Editor. It still constrains any
+future table owned by a role without `BYPASSRLS`, and it is what made the
+wrong-role import case detectable. The boundary that protects the board from
+the internet is RLS with zero policies plus revoked grants, against
+`anon`/`authenticated`/`authenticator` — all three of which are provably
+`rolbypassrls = false`.
 
 **Your local copy is never touched.** The export is read-only input, and the app
 keeps reading `localStorage` exactly as before. Nothing about this phase changes
