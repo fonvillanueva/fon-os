@@ -113,6 +113,16 @@ The default grants Supabase hands `anon` and `authenticated` are explicitly
 revoked, so the denial does not rest on RLS alone. `supabase/tests/rls.test.mjs`
 proves both halves: a role that has been *granted* `SELECT` still reads zero rows.
 
+### Accepted residual: Supabase's own default privileges
+
+The migration revokes default privileges per owning role (below), but on
+Supabase the entries are owned by `supabase_admin` and **a project owner cannot
+alter them**. `verify.sql` check 18 reports this as a permanent **FAIL**, which
+is deliberate — see **RES-001** in
+[`phase-3-verification.md`](phase-3-verification.md). Check 19 is the
+compensating control. A DDL event trigger was proposed as an alternative and
+rejected in review for failing open; it is not in the migrations.
+
 ### Default privileges are revoked per owning role
 
 `ALTER DEFAULT PRIVILEGES` with no `FOR ROLE` edits only the entries owned by
@@ -202,7 +212,7 @@ and can be applied one at a time instead, in filename order.
 
 ### What `verify.sql` checks
 
-**19 checks plus an overall verdict.** Six tables exist; RLS enabled **and
+**19 checks, a context note, and an overall verdict (21 rows).** Six tables exist; RLS enabled **and
 forced** on all six; zero policies; `anon`/`authenticated` hold no privilege on
 any public table (via grantor-independent `has_table_privilege`, which also sees
 privileges inherited through role membership) and no catalogued grants either;
@@ -213,12 +223,17 @@ excluding Pong; no task data yet; **no default privileges granting `anon` or
 `authenticated`**; and **every** table in `public` — not just the six — has RLS
 enabled and forced.
 
+Check 18 is expected to FAIL on Supabase — accepted residual RES-001, not
+softened. Check 19 is its compensating control.
+
 `supabase/tests/apply-all.test.mjs` proves the query is not merely
 rubber-stamping. It deliberately disables RLS, un-forces RLS, adds a policy,
 grants `anon` access directly and through an intermediary role, seeds a
-foreign-owned default privilege, creates an unprotected table, drops a
-constraint, and drops each audit guard in turn — asserting the report goes
-**FAIL** every time.
+foreign-owned default privilege, creates an unprotected table via plain
+`CREATE TABLE`, `CREATE TABLE AS`, `SELECT INTO` and a different owning role,
+drops a constraint, and drops each audit guard in turn — asserting the report
+goes **FAIL** every time. It also asserts the context note cannot turn a
+failing board green.
 
 ### Rollback
 
@@ -243,7 +258,30 @@ used. **I cannot reach that data, and nothing here tries to.** The path is:
    ```bash
    node supabase/import/generate-sql.mjs fon-os-backup-2026-09-21.json "iPhone" > import.sql
    ```
-3. Review `import.sql`, then paste it into the Supabase SQL editor.
+3. Review `import.sql`, then run it **as a role that can bypass RLS** — see
+   below.
+
+### Which role may run the import
+
+Every table carries **FORCE** row level security with no policies, and FORCE
+applies to the table owner too. So an ordinary owner's `INSERT` is refused:
+
+| Executing role | `INSERT` into `public.tasks` |
+|---|---|
+| table owner, no `BYPASSRLS` | **refused** — `new row violates row-level security policy` |
+| a role holding `BYPASSRLS` (e.g. `service_role`) | allowed |
+
+The generated script therefore opens with a **preflight** that checks
+`rolbypassrls` across the executing role and everything it inherits, and raises
+`insufficient_privilege` with a role-shaped message before writing anything. A
+refused run leaves **zero** rows and zero import batches — tested.
+
+**This is why the import path is not yet declared ready.** Whether the Supabase
+SQL Editor's role carries `BYPASSRLS` on this project has not been confirmed,
+and it is a one-line read-only query to settle. Until it is, the documented
+route is: run the import as a role known to hold `BYPASSRLS`. If the SQL Editor
+role does not, the alternatives are `psql` as a `BYPASSRLS` role, or a
+server-side import in Phase 4 using the service-role key.
 
 **Your local copy is never touched.** The export is read-only input, and the app
 keeps reading `localStorage` exactly as before. Nothing about this phase changes

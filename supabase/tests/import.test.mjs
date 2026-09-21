@@ -131,6 +131,80 @@ describe("the import is idempotent", () => {
   });
 });
 
+// Independent review found that FORCE row level security applies to the table
+// owner too, so the documented "paste it into the SQL Editor" path only works
+// for a role that can bypass RLS. These pin the behaviour in both directions.
+describe("the import refuses to run as a role that cannot bypass RLS", () => {
+  async function asRole(role, fn) {
+    await db.exec(`set role ${role}`);
+    try {
+      return await fn();
+    } finally {
+      // The failed statement aborts the transaction the script opened.
+      await db.exec("rollback");
+      await db.exec("reset role");
+    }
+  }
+
+  beforeEach(async () => {
+    await db.exec(`
+      do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'importer') then
+          create role importer nologin;
+        end if;
+      end $$;
+      grant usage on schema public to importer;
+      grant all on public.tasks, public.area_notes, public.import_batches to importer;
+    `);
+  });
+
+  it("stops at the preflight with a role-shaped message, not a data-shaped one", async () => {
+    const sql = buildImportSql(backup(createInitialState()));
+
+    const error = await asRole("importer", async () => {
+      try {
+        await db.exec(sql);
+        return null;
+      } catch (e) {
+        return e;
+      }
+    });
+
+    expect(error).not.toBeNull();
+    expect(error.message).toMatch(/cannot bypass row level security/i);
+    // The bare RLS error is what the preflight exists to replace.
+    expect(error.message).not.toMatch(/violates row-level security policy/i);
+  });
+
+  it("writes nothing at all when it refuses", async () => {
+    await asRole("importer", async () => {
+      try { await db.exec(buildImportSql(backup(createInitialState()))); } catch { /* expected */ }
+    });
+
+    const { rows } = await db.query(`
+      select (select count(*) from public.tasks)::int          as tasks,
+             (select count(*) from public.import_batches)::int as batches
+    `);
+    expect(rows[0]).toEqual({ tasks: 0, batches: 0 });
+  });
+
+  it("still imports normally for a role that can bypass RLS", async () => {
+    const state = createInitialState();
+    await apply(backup(state));
+
+    const { rows } = await db.query("select count(*)::int n from public.tasks");
+    expect(rows[0].n).toBe(state.tasks.length);
+  });
+
+  it("carries the preflight in the generated script itself, not just the docs", async () => {
+    const sql = buildImportSql(backup(createInitialState()));
+    expect(sql).toMatch(/rolbypassrls/);
+    expect(sql).toMatch(/insufficient_privilege/);
+    // It must come before any write.
+    expect(sql.indexOf("rolbypassrls")).toBeLessThan(sql.indexOf("insert into public."));
+  });
+});
+
 describe("the import never destroys data", () => {
   it("updates a changed task in place instead of duplicating it", async () => {
     const task = createTask({ title: "Original title", area: "home" });

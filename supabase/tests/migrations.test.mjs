@@ -39,6 +39,60 @@ describe("migration files", () => {
   });
 });
 
+// The explicit per-table lockdown in 20260921000600_rls_fail_closed.sql is the
+// real preventive control: it is reviewable and it cannot fail open. Its one
+// weakness is that a future migration could add a table and forget to list it.
+// These tests close that, so the rule survives contact with future work.
+describe("every table a migration creates is explicitly locked down", () => {
+  it("names every created table in the RLS lockdown list", async () => {
+    const created = new Set();
+    for (const name of await migrationFiles()) {
+      const sql = await readMigration(name);
+      for (const m of sql.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?public\.(\w+)/gi)) {
+        created.add(m[1]);
+      }
+    }
+    expect(created.size).toBeGreaterThan(0);
+
+    const lockdown = await readMigration("20260921000600_rls_fail_closed.sql");
+    const listed = new Set([...lockdown.matchAll(/'(\w+)'/g)].map((m) => m[1]));
+
+    const missing = [...created].filter((t) => !listed.has(t));
+    expect(missing, `tables created but not locked down: ${missing.join(", ")}`).toEqual([]);
+  });
+
+  it("ends with RLS enabled, forced, and no api-role privileges on all of them", async () => {
+    db = await freshDb();
+    const { rows } = await db.query(`
+      select c.relname,
+             c.relrowsecurity as enabled,
+             c.relforcerowsecurity as forced,
+             has_table_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as anon_any,
+             has_table_privilege('authenticated', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as auth_any
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'public' and c.relkind = 'r'
+    `);
+
+    expect(rows.length).toBe(6);
+    for (const r of rows) {
+      expect(r.enabled, `${r.relname} RLS`).toBe(true);
+      expect(r.forced, `${r.relname} FORCE`).toBe(true);
+      expect(r.anon_any, `${r.relname} anon`).toBe(false);
+      expect(r.auth_any, `${r.relname} authenticated`).toBe(false);
+    }
+  });
+
+  it("does not install a DDL event trigger — rejected in review as fail-open", async () => {
+    db = await freshDb();
+    const { rows } = await db.query("select evtname from pg_event_trigger");
+    expect(rows).toEqual([]);
+
+    for (const name of await migrationFiles()) {
+      expect(await readMigration(name)).not.toMatch(/event[_ ]trigger/i);
+    }
+  });
+});
+
 describe("re-running migrations is safe", () => {
   it("applies twice without error", async () => {
     db = await freshDb();

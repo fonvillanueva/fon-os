@@ -70,9 +70,37 @@ describe("verify.sql", () => {
     expect(rows.at(-1)).toMatchObject({ check: "OVERALL", status: "PASS" });
   });
 
-  it("covers nineteen checks plus an overall verdict", async () => {
+  it("covers nineteen checks plus a context note and an overall verdict", async () => {
     db = await freshDb();
-    expect(await runVerify(db)).toHaveLength(20);
+    const rows = await runVerify(db);
+    expect(rows).toHaveLength(21);
+    expect(rows.filter((r) => r.status === "NOTE")).toHaveLength(1);
+  });
+
+  // The context row explains why check 18 fails on Supabase. It must never be
+  // able to turn a failing board green.
+  it("the context note carries no status weight", async () => {
+    db = await freshDb();
+    await db.exec("create role seeding_admin superuser");
+    await db.exec(
+      "alter default privileges for role seeding_admin in schema public grant all on tables to anon",
+    );
+
+    const rows = await runVerify(db);
+    const note = rows.find((r) => r.status === "NOTE");
+    const check18 = rows.find((r) => r.check.includes("No default privileges"));
+
+    expect(note.check).toMatch(/^CONTEXT:/);
+    expect(check18.status).toBe("FAIL");
+    expect(rows.at(-1)).toMatchObject({ check: "OVERALL", status: "FAIL" });
+    expect(rows.at(-1).detail).toMatch(/1 failed/);
+  });
+
+  it("still reports OVERALL PASS when nothing is wrong, note included", async () => {
+    db = await freshDb();
+    const rows = await runVerify(db);
+    expect(rows.filter((r) => r.status === "FAIL")).toEqual([]);
+    expect(rows.at(-1)).toMatchObject({ check: "OVERALL", status: "PASS" });
   });
 
   it("fails loudly if RLS is switched off", async () => {
@@ -142,6 +170,35 @@ describe("verify.sql", () => {
     expect(check.status).toBe("FAIL");
     expect(check.detail).toContain("added_via_dashboard");
     expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  // Check 19 is the compensating control for the accepted platform residual, so
+  // its value rests on being path-independent. A preventive DDL trigger keyed on
+  // command tags misses these two — CREATE TABLE AS emits 'CREATE TABLE AS' and
+  // SELECT INTO emits 'SELECT INTO'. A check on end state does not care how the
+  // table arrived.
+  it.each([
+    ["CREATE TABLE AS", "create table public.materialised as select 1 as id"],
+    ["SELECT INTO", "select 1 as id into public.selected_into"],
+  ])("catches a table created by %s", async (_label, statement) => {
+    db = await freshDb();
+    await db.exec(statement);
+
+    const rows = await runVerify(db);
+    const check = rows.find((r) => r.check.includes("EVERY table"));
+    expect(check.status).toBe("FAIL");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("catches a table left unprotected whoever created it", async () => {
+    db = await freshDb();
+    await db.exec("create role other_owner superuser");
+    await db.exec("set role other_owner; create table public.made_elsewhere (id int); reset role");
+
+    const rows = await runVerify(db);
+    const check = rows.find((r) => r.check.includes("EVERY table"));
+    expect(check.status).toBe("FAIL");
+    expect(check.detail).toContain("made_elsewhere");
   });
 
   it("fails loudly if a table has RLS enabled but not forced", async () => {

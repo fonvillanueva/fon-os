@@ -213,4 +213,117 @@ Check 18 is the one that settles Step 2: PASS means the default-ACL entries are
 gone; FAIL names the role that still owns them, and the remediation is to run
 the revoke as a role holding that membership.
 
-**Result:** _to be recorded here._
+**Result — recorded 2026-09-21: 20 rows, OVERALL FAIL, 18 passed, 1 failed.**
+
+Check 12 **PASS** — `audit_log_append_only, audit_log_no_truncate`. The Phase 5
+blocker fix is live.
+
+Check 18 **FAIL** — `supabase_admin owns S, supabase_admin owns r,
+supabase_admin owns f`. Everything else passed.
+
+Attempting the revoke as the SQL Editor's role returned
+`ERROR: 42501: permission denied to set role "supabase_admin"`. The entries
+cannot be altered from this project. Recorded below as **RES-001**.
+
+---
+
+## RES-001 — accepted residual: `supabase_admin` default privileges
+
+| | |
+|---|---|
+| **Status** | Accepted. Not fixable by this project. |
+| **Owner** | Fon (project owner) |
+| **Detected by** | `verify.sql` check 18 — which stays **FAIL** |
+| **Compensating control** | `verify.sql` check 19 |
+| **Review** | Re-assess if Supabase ever grants project owners control of these entries |
+
+### What it is
+
+Supabase seeds default privileges granting `anon` and `authenticated` on
+tables, sequences and functions in `public`, owned by the `supabase_admin`
+role. These are the platform's own defaults, present on every Supabase project;
+they are not a misconfiguration of ours.
+
+### Why it is not fixed
+
+`ALTER DEFAULT PRIVILEGES` is scoped to the role owning the entry, and altering
+another role's entries requires membership of it. `postgres` — the role the SQL
+Editor runs as — is refused: `permission denied to set role "supabase_admin"`.
+There is no path from a project owner's privileges to removing them.
+
+### What it actually exposes
+
+A default-ACL entry applies **only to objects created by the role that owns it**
+(tested in `rls.test.mjs`, "a surviving foreign entry does not affect tables
+created by another role"):
+
+| Table created by | `anon` holds SELECT? |
+|---|---|
+| the role running our migrations | **no** |
+| `supabase_admin` | **yes** |
+
+So it does not touch the six Phase 3 tables, nor any table a reviewed migration
+creates. It bites only for an object created in `public` by `supabase_admin` —
+an extension install or a platform operation.
+
+### Why check 18 stays FAIL
+
+Because it is true. The entries are there. Softening the check, renaming it, or
+excluding `supabase_admin` from it would produce a green board that no longer
+describes the database — and the next reader would have no way to tell an
+accepted residual from a regression. A check that lies to look green is worth
+less than no check.
+
+The board therefore reads **OVERALL FAIL**, permanently, until Supabase changes
+what it is possible to do here. `verify.sql` emits a `NOTE` row pointing at this
+entry so whoever runs it knows the FAIL is expected; that row carries no status
+weight and cannot turn a failing board green, which is pinned by a test.
+
+### Controls that stand in its place
+
+1. **Check 19** — every table in `public`, not just the six, must have
+   `relrowsecurity` **and** `relforcerowsecurity`. It inspects end state, so it
+   is **path-independent**: it catches a table however it arrived, including
+   `CREATE TABLE AS` and `SELECT INTO`, which a DDL-tag-based trigger misses.
+   Failure-injection tests cover all of those.
+2. **Explicit per-table lockdown in every migration** — see the rule below.
+
+### Rejected: a DDL event trigger
+
+A `ddl_command_end` event trigger that hardened new `public` tables was proposed
+and **rejected in independent review**. Reproduced here rather than argued:
+
+- **It fails open.** `BEGIN … EXCEPTION` opens a subtransaction, so a failure in
+  the third statement rolls back the `enable` and `force` with it. The table
+  ends up with **no RLS at all** — the exact condition the control existed to
+  prevent — signalled only by a `WARNING` in logs nobody reads.
+- **It misses the likely paths.** `CREATE TABLE AS` and `SELECT INTO` carry
+  different command tags and were not covered.
+- **It would break seeding migrations** and could half-break an extension that
+  creates a table in `public`.
+
+It is not in the migrations, and `migrations.test.mjs` asserts no event trigger
+exists and that no migration file mentions one.
+
+---
+
+## Rule: every future migration locks its tables down explicitly
+
+Any migration that creates a table in `public` **must**, in the same migration:
+
+```sql
+alter table public.<name> enable row level security;
+alter table public.<name> force row level security;
+revoke all on public.<name> from anon, authenticated;
+```
+
+In practice: add the table to the array in
+`20260921000600_rls_fail_closed.sql`. This is the real preventive control — it
+is explicit, reviewable in a diff, and it cannot fail open.
+
+Two tests enforce it:
+
+- `migrations.test.mjs`, "names every created table in the RLS lockdown list" —
+  scans the migration files and fails if a created table is not listed.
+- `migrations.test.mjs`, "ends with RLS enabled, forced, and no api-role
+  privileges on all of them" — asserts the end state for every table.

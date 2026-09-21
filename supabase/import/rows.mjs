@@ -14,6 +14,12 @@
 //  3. **Last-write-wins by updated_at.** Re-importing an *older* export cannot
 //     roll back a newer row that is already in the database.
 //
+// It also refuses to start unless the executing role can bypass RLS. Every
+// table carries FORCE row level security with no policies, so RLS applies to
+// the table owner too and an ordinary owner's INSERT is refused. Failing on
+// line one with a role-shaped message beats failing half-way with a
+// data-shaped one.
+//
 // This module is pure: no network, no credentials, no database connection. The
 // SQL it produces is applied by a human in the Supabase SQL editor, or in
 // Phase 4 by a server holding the service-role key.
@@ -108,6 +114,28 @@ export function buildImportSql(exported, { label = "" } = {}) {
     `-- tasks: ${tasks.length}  area notes: ${areaNotes.length}`,
     "",
     "begin;",
+    "",
+    "-- Preflight: public.tasks has FORCE row level security with no policies, so",
+    "-- RLS applies to the table owner too. Only a role holding BYPASSRLS can",
+    "-- insert. Without this guard the script fails part-way through with a bare",
+    "-- \"violates row-level security policy\", which reads like a data problem",
+    "-- rather than a wrong-role problem.",
+    "do $preflight$",
+    "declare",
+    "  bypasses boolean;",
+    "begin",
+    "  select bool_or(r.rolbypassrls) into bypasses",
+    "  from pg_roles r",
+    "  where pg_has_role(current_user, r.oid, 'USAGE');",
+    "",
+    "  if not coalesce(bypasses, false) then",
+    "    raise exception",
+    "      'Fon''s OS import: role % cannot bypass row level security, so every INSERT here would be refused.', current_user",
+    "      using errcode = 'insufficient_privilege',",
+    "            hint = 'Run this as a role holding BYPASSRLS (on Supabase: service_role, or postgres if it has the attribute). See docs/phase-3-supabase.md, \"Which role may run the import\".';",
+    "  end if;",
+    "end",
+    "$preflight$;",
     "",
     "-- Records the batch. A second run of the same payload hits the unique",
     "-- (kind, checksum) constraint and does nothing.",

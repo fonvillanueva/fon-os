@@ -4,7 +4,15 @@
 -- It reads only the catalog — it creates nothing, changes nothing, and needs no
 -- privileges beyond reading system views. Copy the whole result back for review.
 --
--- Every row should read PASS. The final row is the overall verdict.
+-- Every application-controlled row should read PASS.
+--
+-- Check 18 is expected to FAIL on Supabase: the default privileges it reports
+-- are owned by `supabase_admin`, which a project owner cannot alter. That is
+-- recorded as accepted residual RES-001, and the check is deliberately NOT
+-- softened to produce a green board — see docs/phase-3-verification.md.
+-- Check 19 is the compensating control.
+--
+-- The final row is the overall verdict, and it counts check 18's FAIL.
 
 with expected_tables(name) as (
   values ('area_notes'), ('audit_log'), ('idempotency_keys'),
@@ -203,6 +211,12 @@ results(ord, check_name, status, detail) as (
 )
 
 select ord as "#", check_name as "check", status, detail from results
+union all
+-- Context row. Status is NOTE, so it changes no check and no verdict: the
+-- OVERALL count below still sees check 18's FAIL.
+select 98, 'CONTEXT: check 18 is a platform-owned default ACL this project cannot alter',
+  'NOTE',
+  'Accepted residual RES-001 — see docs/phase-3-verification.md. Every other check is application-controlled.'
 union all
 select 99, 'OVERALL',
   case when exists (select 1 from results where status = 'FAIL') then 'FAIL' else 'PASS' end,
