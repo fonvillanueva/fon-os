@@ -134,13 +134,50 @@ select defaclrole::regrole              as for_role,
 from pg_default_acl;
 ```
 
-**Result:** _to be recorded here._
+**Result — recorded 2026-09-21: the finding is load-bearing.**
 
-This answers whether the hosted project's default-ACL entries are owned by the
-role that ran `apply-all.sql`. If they are, the original statements did work and
-this reduces to hardening plus the new checks. If they are owned by
-`supabase_admin` or another role, the original revoke was a no-op and the fix is
-load-bearing.
+24 rows returned. The **`public`-schema entries for sequences, tables and
+functions are owned by `supabase_admin`**, and include grants to `anon` and
+`authenticated`.
+
+`supabase_admin` is not the role that ran `apply-all.sql` (the SQL Editor runs
+as `postgres`), so **the three unqualified `ALTER DEFAULT PRIVILEGES` statements
+in the first apply were a silent no-op on this project**, exactly as the review
+predicted. Those entries are still live.
+
+### What that does and does not expose
+
+A default-ACL entry applies only to objects created **by the role that owns the
+entry**. Reproduced in `rls.test.mjs`, "a surviving foreign entry does not
+affect tables created by another role":
+
+| Table created by | `anon` holds SELECT? |
+|---|---|
+| the role running our migrations (`postgres`) | **no** |
+| `supabase_admin` | **yes** |
+
+So the Phase 4 tables, created by `postgres` through these migrations, are not
+exposed by the surviving entry. The exposure is narrower than "every future
+table": it is **every future object in `public` created by `supabase_admin`** —
+which includes some extension installs and platform operations, not routine
+migration work.
+
+That is a real gap worth closing, and it is not a reason to relax: it is
+detected by check 18 (the entry itself) and check 19 (any table that ends up
+without RLS, whoever created it).
+
+### If Step 2 cannot clear it
+
+`ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin` requires membership of
+`supabase_admin`. On Supabase's managed platform `postgres` may not have it. The
+migration anticipates this: the revoke is skipped, a `WARNING` prints the exact
+remediation SQL, and **check 18 reports FAIL** rather than the failure passing
+unnoticed. Tested in `rls.test.mjs`, "skips with a warning, not an error, when
+membership of the owning role is missing".
+
+If that happens, the honest position is: checks 18 and 19 remain the control,
+every migration must continue to enable and force RLS on creation, and clearing
+the entry needs a role that has the membership.
 
 ### Step 2 — re-apply
 

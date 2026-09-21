@@ -51,15 +51,17 @@ $$;
 -- remediation, and `supabase/verify.sql` check 17 reports FAIL — the failure is
 -- never silent.
 
-do $$
+create or replace function app.revoke_api_default_privileges()
+returns void
+language plpgsql
+as $$
 declare
   entry     record;
   obj_label text;
   blocked   text := '';
 begin
   for entry in
-    select distinct defaclrole as role_oid,
-           pg_get_userbyid(defaclrole) as role_name,
+    select distinct pg_get_userbyid(defaclrole) as role_name,
            defaclobjtype as objtype
     from pg_default_acl
     where defaclnamespace = 'public'::regnamespace
@@ -80,18 +82,24 @@ begin
       );
     exception
       when insufficient_privilege then
-        blocked := blocked || format(E'\n  alter default privileges for role %I in schema public revoke all on %s from anon, authenticated;',
-                                     entry.role_name, obj_label);
+        blocked := blocked || format(
+          E'\n  alter default privileges for role %I in schema public revoke all on %s from anon, authenticated;',
+          entry.role_name, obj_label);
     end;
   end loop;
 
   if blocked <> '' then
     raise warning
-      E'Could not revoke default privileges owned by another role (membership required).\nRun these as a role that has it (Supabase: the postgres or supabase_admin role):%s',
+      E'Could not revoke default privileges owned by another role (membership required).\nRun these as a role that has it (on Supabase, supabase_admin owns them):%s',
       blocked;
   end if;
 end;
 $$;
+
+comment on function app.revoke_api_default_privileges() is
+  'Revokes anon/authenticated default privileges in public FOR ROLE each owning role. Skips with a WARNING where membership is missing; verify.sql check 18 then reports FAIL.';
+
+select app.revoke_api_default_privileges();
 
 -- Also cover the executing role's own entries, including ones that do not exist
 -- yet and so were invisible to the loop above.

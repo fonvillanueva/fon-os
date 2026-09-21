@@ -21,6 +21,7 @@ drop table if exists public.area_notes cascade;
 drop table if exists public.tasks cascade;
 drop table if exists public.profiles cascade;
 
+drop function if exists app.revoke_api_default_privileges() cascade;
 drop function if exists app.touch_updated_at() cascade;
 drop function if exists app.forbid_mutation() cascade;
 

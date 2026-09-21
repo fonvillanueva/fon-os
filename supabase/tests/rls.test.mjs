@@ -207,6 +207,58 @@ describe("default privileges for tables created later", () => {
     }
   });
 
+  // Confirmed against the hosted project on 2026-09-21: supabase_admin owns the
+  // public-schema entries there, so this is the path Supabase actually takes.
+  it("skips with a warning, not an error, when membership of the owning role is missing", async () => {
+    const database = await withForeignDefaultAcl();
+    try {
+      await database.exec("create role limited nologin; grant usage on schema public to limited");
+      // The function must exist before a limited role can call it. `limited`
+      // models the SQL Editor's role: able to run the migration, but not a
+      // member of the role that owns the default-ACL entries.
+      await applyMigrations(database);
+      await database.exec("grant usage on schema app to limited");
+      await database.exec(
+        "alter default privileges for role seeding_admin in schema public grant all on tables to anon",
+      );
+
+      await database.exec("set role limited");
+      await expect(database.exec("select app.revoke_api_default_privileges()")).resolves.not.toThrow();
+      await database.exec("reset role");
+
+      // It could not revoke, and says so rather than failing silently...
+      expect(await defaultAclOwners(database)).toEqual(["seeding_admin"]);
+      // ...and verify.sql is what catches it — see apply-all.test.mjs.
+    } finally {
+      await database.close();
+    }
+  });
+
+  // Load-bearing for the risk assessment: a surviving entry owned by another
+  // role affects only objects THAT role creates. Tables created by the role
+  // running our migrations are unaffected.
+  it("a surviving foreign entry does not affect tables created by another role", async () => {
+    const database = await freshDb({ migrate: false });
+    try {
+      await database.exec("create role seeding_admin superuser");
+      await database.exec(
+        "alter default privileges for role seeding_admin in schema public grant all on tables to anon",
+      );
+
+      await database.exec("create table public.made_by_current_role (id int)");
+      await database.exec("set role seeding_admin; create table public.made_by_admin (id int); reset role");
+
+      const { rows } = await database.query(`
+        select has_table_privilege('anon', 'public.made_by_current_role', 'SELECT') as by_us,
+               has_table_privilege('anon', 'public.made_by_admin',        'SELECT') as by_them
+      `);
+      expect(rows[0].by_us).toBe(false);
+      expect(rows[0].by_them).toBe(true);
+    } finally {
+      await database.close();
+    }
+  });
+
   it("leaves default privileges for other roles alone", async () => {
     const database = await freshDb({ migrate: false });
     try {
