@@ -48,7 +48,7 @@ $$;
 --
 -- `ALTER DEFAULT PRIVILEGES FOR ROLE x` requires membership of x. If that is
 -- missing the statement is skipped with a loud WARNING naming the exact
--- remediation, and `supabase/verify.sql` check 17 reports FAIL — the failure is
+-- remediation, and `supabase/verify.sql` check 18 reports FAIL — the failure is
 -- never silent.
 
 create or replace function app.revoke_api_default_privileges()

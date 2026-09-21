@@ -196,6 +196,77 @@ describe("the import refuses to run as a role that cannot bypass RLS", () => {
     expect(rows[0].n).toBe(state.tasks.length);
   });
 
+  // Regression: BYPASSRLS is a role ATTRIBUTE, not a privilege, so it is not
+  // inherited through membership. An earlier preflight aggregated
+  // pg_has_role(..., 'USAGE') over inherited roles and reported "can bypass"
+  // for a role that demonstrably could not — passing the guard, then failing on
+  // the first INSERT with the very error the guard exists to pre-empt.
+  it("refuses a role that is a MEMBER of a BYPASSRLS role but lacks the attribute", async () => {
+    await db.exec(`
+      do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'bypasser') then
+          create role bypasser nologin bypassrls;
+        end if;
+        if not exists (select 1 from pg_roles where rolname = 'member_only') then
+          create role member_only nologin inherit;
+        end if;
+      end $$;
+      grant bypasser to member_only;
+      grant usage on schema public to member_only;
+      grant all on public.tasks, public.area_notes, public.import_batches to member_only;
+    `);
+
+    // Precondition: membership is real, the attribute is not.
+    const { rows: pre } = await db.query(`
+      select (select rolbypassrls from pg_roles where rolname = 'member_only') as has_attribute,
+             pg_has_role('member_only', 'bypasser', 'USAGE')                   as is_member
+    `);
+    expect(pre[0]).toEqual({ has_attribute: false, is_member: true });
+
+    const error = await asRole("member_only", async () => {
+      try {
+        await db.exec(buildImportSql(backup(createInitialState())));
+        return null;
+      } catch (e) {
+        return e;
+      }
+    });
+
+    expect(error).not.toBeNull();
+    expect(error.message).toMatch(/cannot bypass row level security/i);
+    expect(error.message).not.toMatch(/violates row-level security policy/i);
+
+    const { rows } = await db.query(`
+      select (select count(*) from public.tasks)::int          as tasks,
+             (select count(*) from public.import_batches)::int as batches
+    `);
+    expect(rows[0]).toEqual({ tasks: 0, batches: 0 });
+  });
+
+  it("reads the executing role's own attributes, not those of inherited roles", async () => {
+    const sql = buildImportSql(backup(createInitialState()));
+    expect(sql).toMatch(/rolname = current_user/);
+    expect(sql).toMatch(/rolbypassrls or r\.rolsuper/);
+    // The inherited-roles form is what produced the false positive.
+    expect(sql).not.toMatch(/pg_has_role/);
+  });
+
+  it("accepts a superuser, which bypasses RLS without the explicit attribute", async () => {
+    await db.exec(`
+      do $$ begin
+        if not exists (select 1 from pg_roles where rolname = 'super_importer') then
+          create role super_importer nologin superuser;
+        end if;
+      end $$;
+    `);
+    await db.exec("set role super_importer");
+    await expect(db.exec(buildImportSql(backup(createInitialState())))).resolves.not.toThrow();
+    await db.exec("reset role");
+
+    const { rows } = await db.query("select count(*)::int n from public.tasks");
+    expect(rows[0].n).toBeGreaterThan(0);
+  });
+
   it("carries the preflight in the generated script itself, not just the docs", async () => {
     const sql = buildImportSql(backup(createInitialState()));
     expect(sql).toMatch(/rolbypassrls/);

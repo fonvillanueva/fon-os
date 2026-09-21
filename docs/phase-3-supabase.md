@@ -197,8 +197,12 @@ Two pastes into **Supabase Dashboard → SQL Editor**:
    migration files. It is safe to run twice.
 2. **Verify.** Paste the whole of [`supabase/verify.sql`](../supabase/verify.sql)
    and run it. It reads only the catalog — creates nothing, changes nothing —
-   and returns 16 checks plus an overall verdict. **Every row should say PASS.**
-   Copy the result back for the review record.
+   and returns **21 rows: 19 checks, a CONTEXT note, and an OVERALL verdict.**
+
+   **Every application-controlled check should say PASS. Check 18 is expected
+   to FAIL** — it reports Supabase's own default privileges, which a project
+   owner cannot alter (accepted residual RES-001), so **OVERALL reads FAIL by
+   design**. Copy the result back for the review record.
 
 Or, if you prefer a terminal and have the connection string:
 

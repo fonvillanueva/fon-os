@@ -20,6 +20,11 @@
 // line one with a role-shaped message beats failing half-way with a
 // data-shaped one.
 //
+// The check reads `current_user`'s own `rolbypassrls`/`rolsuper`. BYPASSRLS is
+// a role attribute, not a privilege, so being a *member* of a BYPASSRLS role
+// confers nothing — an earlier version aggregated over inherited roles and
+// would pass a session that then failed on the first INSERT.
+//
 // This module is pure: no network, no credentials, no database connection. The
 // SQL it produces is applied by a human in the Supabase SQL editor, or in
 // Phase 4 by a server holding the service-role key.
@@ -124,9 +129,13 @@ export function buildImportSql(exported, { label = "" } = {}) {
     "declare",
     "  bypasses boolean;",
     "begin",
-    "  select bool_or(r.rolbypassrls) into bypasses",
+    "  -- BYPASSRLS is a role ATTRIBUTE, not a privilege: it is NOT inherited",
+    "  -- through role membership, and only applies to the role actually",
+    "  -- executing. Checking inherited roles here would pass a session that",
+    "  -- then fails on the first INSERT.",
+    "  select (r.rolbypassrls or r.rolsuper) into bypasses",
     "  from pg_roles r",
-    "  where pg_has_role(current_user, r.oid, 'USAGE');",
+    "  where r.rolname = current_user;",
     "",
     "  if not coalesce(bypasses, false) then",
     "    raise exception",

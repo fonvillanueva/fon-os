@@ -41,7 +41,9 @@ The Phase 3 schema was applied to the hosted Free-plan Supabase project via
 | 16 | No task data present yet (schema only, as expected in Phase 3) | PASS | 0 task rows |
 | 99 | **OVERALL** | **PASS** | **16 passed, 0 failed** |
 
-17 rows returned, matching the 16 checks plus the verdict.
+17 rows returned, matching the 16 checks plus the verdict **as `verify.sql`
+stood on that date**. The file has since grown to 19 checks plus a CONTEXT note
+(21 rows); this record is left at its original 17 rather than restated.
 
 Every value matches what the same SQL produces offline against Postgres 18, and
 the `verify.sql` output is asserted row-for-row in
@@ -206,14 +208,26 @@ is independent of whether messages render, which is why the check exists.
 
 ### Step 3 — re-verify
 
-Paste `supabase/verify.sql` again. Expect **19 checks plus the verdict — 20
-rows — and OVERALL PASS**.
+Paste `supabase/verify.sql` again.
+
+> **Row count — read this before comparing.** The run captured below was made
+> against the version of `verify.sql` that existed at the time: **19 checks plus
+> the verdict, 20 rows.** The CONTEXT note explaining RES-001 was added
+> *afterwards*, in response to the same review that produced RES-001. The
+> current file therefore returns **21 rows: 19 checks, CONTEXT, OVERALL**.
+>
+> No 21-row hosted run has been performed. The captured 20-row result below is
+> the real hosted evidence and is left exactly as it came back. Re-running the
+> current file would return the same 19 check statuses plus the CONTEXT row;
+> that row carries no status weight, so the verdict is unchanged.
 
 Check 18 is the one that settles Step 2: PASS means the default-ACL entries are
-gone; FAIL names the role that still owns them, and the remediation is to run
-the revoke as a role holding that membership.
+gone; FAIL names the role that still owns them.
 
 **Result — recorded 2026-09-21: 20 rows, OVERALL FAIL, 18 passed, 1 failed.**
+
+*(20 rows because this predates the CONTEXT note; the current file returns 21.
+Captured verbatim — not restated against the newer format.)*
 
 Check 12 **PASS** — `audit_log_append_only, audit_log_no_truncate`. The Phase 5
 blocker fix is live.
