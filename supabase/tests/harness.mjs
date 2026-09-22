@@ -11,6 +11,7 @@ import { PGlite } from "@electric-sql/pglite";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = join(HERE, "..", "migrations");
 export const ROLLBACK_FILE = join(HERE, "..", "rollback.sql");
+export const ROLLBACK_PHASE_4_FILE = join(HERE, "..", "rollback-phase-4.sql");
 
 /**
  * Objects Supabase provides that a bare Postgres does not. Creating them here
@@ -37,6 +38,42 @@ const SUPABASE_BOOTSTRAP = `
   end;
   $$;
   grant usage on schema public to anon, authenticated, service_role;
+
+  -- Supabase grants USAGE on the auth schema to the API roles, which is what
+  -- lets a policy call auth.uid() while running as the authenticated role.
+  -- Mirrored here because Phase 4 depends on it; verify.sql check 5a pins it.
+  grant usage on schema auth to anon, authenticated, service_role;
+
+  -- Supabase's own auth.uid(). Reproduced faithfully: it reads the 'sub' claim
+  -- out of the request.jwt.claims GUC that PostgREST sets per request, and
+  -- returns NULL when there is no session. Phase 4's role function and its
+  -- stamping trigger both hinge on that NULL, so the stub must behave the same.
+  --
+  -- The inner nullif matters: a signed-out session leaves the GUC set to the
+  -- empty string, and ''::jsonb is a hard error rather than a null.
+  create or replace function auth.uid()
+  returns uuid
+  language sql
+  stable
+  as $$
+    select nullif(
+      nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub', ''
+    )::uuid
+  $$;
+
+  -- Supabase's auth.jwt(). Present only so the D5a invariant is testable: a
+  -- policy gating on an assurance claim has to be creatable before a check can
+  -- be shown to catch it. Nothing in the migrations uses it, by design.
+  create or replace function auth.jwt()
+  returns jsonb
+  language sql
+  stable
+  as $$
+    select coalesce(
+      nullif(current_setting('request.jwt.claims', true), '')::jsonb,
+      '{}'::jsonb
+    )
+  $$;
 `;
 
 export async function migrationFiles() {
@@ -64,6 +101,67 @@ export async function applyMigrations(db) {
 
 export async function applyRollback(db) {
   await db.exec(await readFile(ROLLBACK_FILE, "utf8"));
+}
+
+export async function applyPhase4Rollback(db) {
+  await db.exec(await readFile(ROLLBACK_PHASE_4_FILE, "utf8"));
+}
+
+/** Fixed ids per role, so failures name a recognisable user rather than a nonce. */
+export const USER_IDS = {
+  fon: "00000000-0000-4000-8000-00000000f0f0",
+  abigail: "00000000-0000-4000-8000-0000000ab1ba",
+  accountability: "00000000-0000-4000-8000-00000000acc0",
+};
+
+/** Creates an auth.users row plus its profiles row, and returns the user id. */
+export async function enrol(db, role, { id, email } = {}) {
+  const userId = id ?? USER_IDS[role];
+  if (!userId) throw new Error(`no fixed user id for role ${role}`);
+  await db.query("insert into auth.users (id, email) values ($1, $2)", [
+    userId,
+    email ?? `${role}@example.test`,
+  ]);
+  await db.query("insert into public.profiles (user_id, role) values ($1, $2)", [userId, role]);
+  return userId;
+}
+
+/** An auth.users row with NO profile — the state a stray signup lands in. */
+export async function signUpWithoutProfile(db, id = "00000000-0000-4000-8000-00000000ffff") {
+  await db.query("insert into auth.users (id, email) values ($1, 'stray@example.test')", [id]);
+  return id;
+}
+
+/**
+ * Runs `fn` as a signed-in PostgREST session: role `authenticated`, with
+ * request.jwt.claims carrying `sub`, exactly as Supabase presents it. Pass a
+ * null userId for a signed-out session.
+ *
+ * The role and the GUC are always restored, including when `fn` throws, so one
+ * failing expectation cannot leak a role into the next test.
+ */
+export async function withUser(db, userId, fn) {
+  await db.query("select set_config('request.jwt.claims', $1, false)", [
+    userId === null ? "" : JSON.stringify({ sub: userId, role: "authenticated" }),
+  ]);
+  await db.exec("set role authenticated");
+  try {
+    return await fn();
+  } finally {
+    await db.exec("reset role");
+    await db.query("select set_config('request.jwt.claims', '', false)");
+  }
+}
+
+/** Same, for `anon`: no session at all. */
+export async function withAnon(db, fn) {
+  await db.query("select set_config('request.jwt.claims', '', false)");
+  await db.exec("set role anon");
+  try {
+    return await fn();
+  } finally {
+    await db.exec("reset role");
+  }
 }
 
 /**

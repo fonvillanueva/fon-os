@@ -70,11 +70,16 @@ describe("verify.sql", () => {
     expect(rows.at(-1)).toMatchObject({ check: "OVERALL", status: "PASS" });
   });
 
-  it("covers nineteen checks plus a context note and an overall verdict", async () => {
+  // Nineteen Phase 3 checks, six added by Phase 4 (5a and 20-24), plus the
+  // context note and the overall verdict.
+  it("covers twenty-five checks plus a context note and an overall verdict", async () => {
     db = await freshDb();
     const rows = await runVerify(db);
-    expect(rows).toHaveLength(21);
+    expect(rows).toHaveLength(27);
     expect(rows.filter((r) => r.status === "NOTE")).toHaveLength(1);
+    // The Phase 4 additions are present and numbered as the plan describes.
+    const numbers = rows.map((r) => String(r["#"]));
+    for (const n of ["5a", "20", "21", "22", "23", "24"]) expect(numbers).toContain(n);
   });
 
   // The context row explains why check 18 fails on Supabase. It must never be
@@ -112,12 +117,25 @@ describe("verify.sql", () => {
     expect(rows.at(-1).status).toBe("FAIL");
   });
 
-  it("fails loudly if someone adds a policy", async () => {
+  it("fails loudly if someone adds a policy outside the expected set", async () => {
     db = await freshDb();
     await db.exec("create policy temp_open on public.tasks for select using (true)");
 
     const rows = await runVerify(db);
-    expect(rows.find((r) => r.check.includes("Zero policies")).status).toBe("FAIL");
+    const check4 = rows.find((r) => r.check.includes("Policies match the expected set"));
+    expect(check4.status).toBe("FAIL");
+    expect(check4.detail).toMatch(/UNEXPECTED tasks.temp_open/);
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("fails loudly if an expected policy is dropped", async () => {
+    db = await freshDb();
+    await db.exec("drop policy tasks_fon_select on public.tasks");
+
+    const rows = await runVerify(db);
+    const check4 = rows.find((r) => r.check.includes("Policies match the expected set"));
+    expect(check4.status).toBe("FAIL");
+    expect(check4.detail).toMatch(/MISSING tasks.tasks_fon_select/);
     expect(rows.at(-1).status).toBe("FAIL");
   });
 
@@ -126,8 +144,18 @@ describe("verify.sql", () => {
     await db.exec("grant select on public.tasks to anon");
 
     const rows = await runVerify(db);
-    expect(rows.find((r) => r.check.includes("hold no privilege")).status).toBe("FAIL");
-    expect(rows.find((r) => r.check.includes("No catalogued grants")).status).toBe("FAIL");
+    expect(rows.find((r) => r.check.includes("anon holds no privilege")).status).toBe("FAIL");
+    expect(rows.at(-1).status).toBe("FAIL");
+  });
+
+  it("fails loudly if authenticated is granted more than the expected set", async () => {
+    db = await freshDb();
+    await db.exec("grant select on public.audit_log to authenticated");
+
+    const rows = await runVerify(db);
+    const check5 = rows.find((r) => r.check.includes("authenticated holds exactly"));
+    expect(check5.status).toBe("FAIL");
+    expect(check5.detail).toMatch(/UNEXPECTED SELECT on audit_log/);
     expect(rows.at(-1).status).toBe("FAIL");
   });
 
@@ -143,7 +171,7 @@ describe("verify.sql", () => {
     `);
 
     const rows = await runVerify(db);
-    expect(rows.find((r) => r.check.includes("hold no privilege")).status).toBe("FAIL");
+    expect(rows.find((r) => r.check.includes("anon holds no privilege")).status).toBe("FAIL");
     expect(rows.at(-1).status).toBe("FAIL");
   });
 
