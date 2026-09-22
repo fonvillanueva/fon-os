@@ -1,15 +1,23 @@
 @import "tailwindcss";
 
 /*
- * Tailwind scans the whole project for class names. Without this exclusion it
- * finds ordinary English and SQL in the database migrations — "contents",
- * "truncate", "lowercase" — and emits rules for classes no element uses.
+ * Tailwind scans the whole project for class names, so any directory of prose
+ * or code that is not markup becomes an accidental source of CSS: ordinary
+ * English and SQL — "contents", "truncate", "fixed" — match utility names and
+ * emit rules no element uses.
  *
- * Only supabase/ is excluded, deliberately: docs/ and scripts/ were already
- * being scanned before Phase 3, and excluding them too would change the
- * shipped CSS. This keeps the built stylesheet byte-identical to main.
+ * None of these three directories is markup, so none of them should influence
+ * the stylesheet. Excluding docs/ drops `.fixed`, which came from prose in
+ * docs/claude-import.md and docs/phase-3-verification.md. Excluding scripts/
+ * changes nothing today and is here so that adding a build script cannot
+ * quietly grow the bundle later. supabase/ was excluded in Phase 3 for the
+ * same reason.
+ *
+ * Only src/ and index.html decide what ships.
  */
 @source not "../supabase";
+@source not "../docs";
+@source not "../scripts";
 
 /*
  * iOS standalone (Add to Home Screen) draws under the status bar and the
