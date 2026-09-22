@@ -7,7 +7,8 @@
 > Contains no migrations, no application code and no dependencies. The SQL is
 > illustrative design, not files to apply.
 >
-> - **Baseline:** merged `main` at `3dc59ae` (Phase 3).
+> - **Baseline:** merged `main` at `15c9669` — Phase 3 (`3dc59ae`) plus the
+>   Tailwind scope prerequisite, PR #4, now merged.
 > - **Not done:** no Supabase change, no Vercel change, no deploy, no app
 >   connection, no user creation, no data import.
 > - **Decisions D1–D6 are RESOLVED** and recorded at the end. One sub-question
@@ -592,8 +593,8 @@ separate entries with the correct controls.
 
 | # | Step | PR / manual | Reversible by |
 |---|---|---|---|
-| 1 | Tailwind scope prerequisite — **lands before PR #3 merges** | **PR #4** | `git revert` |
-| 2 | Rebase PR #3 onto the post-#4 `main`, then merge the plan | — | `git revert` |
+| 1 | Tailwind scope prerequisite — **merged as `15c9669`** ✅ | **PR #4** | `git revert` |
+| 2 | Rebase PR #3 onto the post-#4 `main` ✅, then merge the plan | — | `git revert` |
 | 3 | Disable public sign-ups | manual | Re-enable |
 | 4 | Create three auth users | manual | Delete users (manual, never scripted) |
 | 5 | DB migration: role function, grants, triggers, policies, view, **Checks 4 / 5 / 5a / 6 / 20**, converted Phase 3 suites | **PR #5** | `supabase/rollback-phase-4.sql` |
@@ -895,12 +896,17 @@ instead of against `main`.
 
 **A second live instance, found while writing this correction.** The sentence
 above about a future script quietly growing the bundle put the word *"grow"*
-into `docs/`, which emitted `.grow{flex-grow:1}` — 18 more bytes. So this
-branch now carries **47 bytes** over `main`: 29 for `.invisible`, 18 for
-`.grow`. The wording is deliberately left as it stands rather than contorted to
-dodge the scanner, because that trade is backwards: documentation should read
-well and the build should stop reading documentation. Both rules vanish once
-PR #4 has landed and this branch is rebased.
+into `docs/`, which emitted `.grow{flex-grow:1}` — 18 more bytes. Before PR #4
+merged, this branch therefore carried **47 bytes** over `main`: 29 for
+`.invisible`, 18 for `.grow`. The wording was deliberately left as it stood
+rather than contorted to dodge the scanner, because that trade is backwards:
+documentation should read well and the build should stop reading documentation.
+
+**Both rules are now gone.** PR #4 merged as `15c9669` and this branch was
+rebased onto it; the build from this branch is **byte-identical to the post-#4
+`main` baseline** — CSS 24 469 bytes, md5 `bfc854089977`, with `.fixed`,
+`.invisible` and `.grow` all absent and `.visible` retained. The mechanism
+worked exactly as the sequencing predicted.
 
 **PR #4 therefore removes 22 bytes immediately and prevents the further 29
 bytes when PR #3 later merges.** That is precisely why **PR #4 must land before
@@ -954,8 +960,8 @@ and revision 3 fixes the **order** as well as the numbers:
 
 | Order | PR | Contents | State |
 |---|---|---|---|
-| **1st** | **#4** | Tailwind scope prerequisite: the two `@source not` lines **and** the corrected adjacent comment (`src/App.css`) | **Open at `001018d`, not merged** |
-| **2nd** | **#3** | **This plan document only** — rebased onto the post-#4 `main`, then merged | Draft, planning only |
+| **1st** | **#4** | Tailwind scope prerequisite: the two `@source not` lines **and** the corrected adjacent comment (`src/App.css`) | ✅ **Merged as `15c9669`** |
+| **2nd** | **#3** | **This plan document only** — rebased onto the post-#4 `main` ✅, then merged | Draft, rebased, **not yet merged** |
 | **3rd** | **#5** | Database: role function, grants, triggers, policies, view, **Checks 4 / 5 / 5a / 6 / 20**, rollback file, converted `rls.test.mjs` and `migrations.test.mjs` | Not started |
 | **4th** | **#6** | App wiring: sign-in, session handling, CSP, sign-out, external-script test | Not started |
 
@@ -963,6 +969,10 @@ and revision 3 fixes the **order** as well as the numbers:
 merge order, and they disagree here. Until #4 lands, every change under `docs/`
 alters the shipped CSS — so merging this plan first would land a documentation
 commit that changes production CSS, which is the precise defect #4 removes.
+
+**This requirement is now satisfied:** #4 merged as `15c9669`, and #3 has been
+rebased onto it. A build from this branch is byte-identical to that baseline,
+so merging #3 now changes no shipped byte.
 
 Import happens **after #6**, manually.
 
