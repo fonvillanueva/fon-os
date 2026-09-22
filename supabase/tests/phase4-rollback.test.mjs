@@ -40,6 +40,31 @@ async function phase3OnlyDb() {
   return fresh;
 }
 
+/** Every default-ACL row, as a comparable snapshot. */
+async function defaultAcl(database) {
+  const { rows } = await database.query(`
+    select pg_get_userbyid(defaclrole) as owner,
+           defaclnamespace::regnamespace::text as schema,
+           defaclobjtype as objtype,
+           defaclacl::text as acl
+      from pg_default_acl
+     order by 1, 2, 3, 4
+  `);
+  return rows;
+}
+
+/** ACLs of every function in schema app; null means owner + PUBLIC. */
+async function functionAcl(database) {
+  const { rows } = await database.query(`
+    select p.proname,
+           coalesce(array_to_string(p.proacl, ' | '), '(default: owner + PUBLIC)') as acl
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'app'
+     order by p.proname
+  `);
+  return rows;
+}
+
 async function counts(database) {
   const { rows } = await database.query(`
     select
@@ -223,6 +248,141 @@ describe("rollback is database-only", () => {
     await applyPhase4Rollback(db);
     const error = await expectViolation(() => db.query("update public.audit_log set action = 'y'"));
     expect(error.message).toMatch(/append-only/i);
+  });
+});
+
+// Reviewer finding: an earlier draft of the rollback ended with
+//
+//   alter default privileges for role postgres in schema app
+//     grant execute on functions to public;
+//
+// meant as the inverse of a Phase 4 statement. Because that Phase 4 statement
+// recorded nothing, the GRANT was not an inverse at all — it CREATED a
+// pg_default_acl row handing PUBLIC EXECUTE on every future app function, where
+// pristine Phase 3 has no such row. The rollback was leaving the catalog wider
+// than it found it.
+//
+// These tests compare the post-rollback catalog against a pristine Phase 3
+// database directly, so any residue of that kind fails rather than being argued
+// about in a comment.
+describe("rollback leaves no catalog residue (default privileges)", () => {
+  it("leaves pg_default_acl exactly as pristine Phase 3 has it", async () => {
+    const pristine = await phase3OnlyDb();
+    const expected = await defaultAcl(pristine);
+    await pristine.close();
+
+    db = await freshDb();
+    await applyPhase4Rollback(db);
+
+    expect(await defaultAcl(db)).toEqual(expected);
+  });
+
+  it("writes no default privilege granting PUBLIC on future app functions", async () => {
+    db = await freshDb();
+    await applyPhase4Rollback(db);
+
+    const rows = await defaultAcl(db);
+    // `=X/` with an empty grantee is PUBLIC holding EXECUTE.
+    for (const r of rows) {
+      expect(r.acl, `${r.schema} ${r.objtype}`).not.toMatch(/(^|,|\{)=X\//);
+    }
+  });
+
+  it("still leaves nothing behind after rollback is run twice", async () => {
+    const pristine = await phase3OnlyDb();
+    const expected = await defaultAcl(pristine);
+    await pristine.close();
+
+    db = await freshDb();
+    await applyPhase4Rollback(db);
+    await applyPhase4Rollback(db);
+
+    expect(await defaultAcl(db)).toEqual(expected);
+  });
+
+  it("the rollback file writes no default privilege at all", async () => {
+    const sql = await readFile(ROLLBACK_PHASE_4_FILE, "utf8");
+    const statements = sql
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+    expect(statements).not.toMatch(/alter\s+default\s+privileges/i);
+  });
+});
+
+// The one place the rollback deliberately does NOT restore pristine Phase 3.
+// It leaves three functions MORE restricted, which is the safe direction — but
+// "safer" is only a defence if it is written down and pinned, otherwise it is
+// indistinguishable from an oversight that might drift either way.
+describe("rollback's deliberate ACL residual is exactly what it claims", () => {
+  const PHASE_3_FUNCTIONS = [
+    "forbid_mutation",
+    "revoke_api_default_privileges",
+    "touch_updated_at",
+  ];
+
+  it("pristine Phase 3 leaves those three at the Postgres default", async () => {
+    const pristine = await phase3OnlyDb();
+    const acl = await functionAcl(pristine);
+    await pristine.close();
+
+    expect(acl.map((r) => r.proname)).toEqual(PHASE_3_FUNCTIONS);
+    for (const r of acl) {
+      expect(r.acl, r.proname).toBe("(default: owner + PUBLIC)");
+    }
+  });
+
+  it("after rollback they are narrower — PUBLIC revoked, and nothing else", async () => {
+    db = await freshDb();
+    await applyPhase4Rollback(db);
+
+    expect(await functionAcl(db)).toEqual(
+      PHASE_3_FUNCTIONS.map((proname) => ({ proname, acl: "postgres=X/postgres" })),
+    );
+  });
+
+  it("no api role can execute them after rollback", async () => {
+    db = await freshDb();
+    await applyPhase4Rollback(db);
+
+    const { rows } = await db.query(`
+      select p.proname, r.rolname
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        cross join (values ('anon'),('authenticated')) r(rolname)
+       where n.nspname = 'app'
+         and has_function_privilege(r.rolname, p.oid, 'EXECUTE')
+    `);
+    expect(rows).toEqual([]);
+  });
+
+  // The reason the residual costs nothing: Postgres does not check EXECUTE on a
+  // trigger function for the triggering user, so Phase 3's triggers still fire.
+  it("Phase 3's triggers still work with PUBLIC revoked", async () => {
+    db = await freshDb();
+    await applyPhase4Rollback(db);
+
+    await insertTask(db, { title: "Before", area: "inbox" });
+    const { rows } = await db.query(
+      "update public.tasks set title = 'After' returning title, updated_at",
+    );
+    expect(rows[0].title).toBe("After");
+
+    // And the append-only guard still raises.
+    await db.query("insert into public.audit_log (actor, action) values ('fon','created')");
+    const error = await expectViolation(() =>
+      db.query("update public.audit_log set action = 'edited'"),
+    );
+    expect(error.message).toMatch(/append-only/i);
+  });
+
+  it("re-applying Phase 4 returns them to the same narrowed ACL", async () => {
+    db = await freshDb();
+    const afterMigrate = await functionAcl(db);
+    await applyPhase4Rollback(db);
+    await applyMigrations(db);
+
+    expect(await functionAcl(db)).toEqual(afterMigrate);
   });
 });
 

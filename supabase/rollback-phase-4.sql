@@ -24,6 +24,30 @@
 --
 -- Safe to run twice, and safe on a database that never had Phase 4 applied.
 -- Every statement is guarded.
+--
+-- ONE DELIBERATE RESIDUAL — this is NOT an exact ACL restoration.
+--
+-- Phase 4 revoked EXECUTE from PUBLIC on three functions Phase 3 created:
+--
+--   app.touch_updated_at()
+--   app.forbid_mutation()
+--   app.revoke_api_default_privileges()
+--
+-- Those revokes are NOT undone here, so after this file runs those three are
+-- MORE restricted than pristine Phase 3, where each still carried the Postgres
+-- default of EXECUTE to PUBLIC. Their ACL reads `postgres=X/postgres` rather
+-- than being null.
+--
+-- That is intentional and it is the safe direction. Re-granting EXECUTE to
+-- PUBLIC to make the catalog match pristine Phase 3 exactly would hand every
+-- role — including `anon` — the ability to call an append-only guard and a
+-- privilege-revoking helper, purely for the sake of a tidier diff. Nothing in
+-- Phase 3 needed PUBLIC to hold those grants: Postgres does not check EXECUTE
+-- on a trigger function for the triggering user, so the Phase 3 triggers keep
+-- working either way.
+--
+-- supabase/tests/phase4-rollback.test.mjs pins the expected post-rollback ACLs
+-- so this difference cannot widen, narrow, or drift unnoticed.
 
 -- ─── The view ─────────────────────────────────────────────────────────────────
 drop view if exists public.school_summary;
@@ -62,10 +86,20 @@ revoke all on public.tasks      from anon, authenticated;
 revoke all on public.area_notes from anon, authenticated;
 revoke all on public.profiles   from anon, authenticated;
 
-alter default privileges for role postgres in schema app
-  grant execute on functions to public;
-
 revoke all on schema app from anon, authenticated;
+
+-- NOT undone here, deliberately: the EXECUTE revokes Phase 4 applied to the
+-- three Phase 3 functions. See the residual note in the header. Re-granting
+-- them would be a widening, and a rollback must only ever narrow.
+--
+-- Nor is any default privilege written back. The plan specified
+-- `alter default privileges ... revoke execute on functions from public`, which
+-- records nothing and does nothing, so the migration omits it — leaving nothing
+-- to reverse. Writing the inverse GRANT here would not restore pristine
+-- Phase 3: it would CREATE a pg_default_acl row granting PUBLIC EXECUTE on
+-- every future app function, where pristine Phase 3 has no such row at all.
+-- That is a widening dressed as a restoration, and the catalog-equality test
+-- would catch it.
 
 -- ─── The role function ────────────────────────────────────────────────────────
 --

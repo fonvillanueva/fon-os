@@ -1,11 +1,27 @@
 # Phase 4 plan — authentication & authorization
 
-> **Status: PLANNING ONLY. Nothing here is implemented.**
+> **Status: the database layer is implemented in draft PR #5 and applied
+> nowhere.** No hosted Supabase change, no users, no app connection, no import.
+> The app wiring (PR #6) is not started.
 >
-> Revision 3, incorporating the closure review of revision 2 (head `3374bd5`),
-> plus a §11 measurement correction made once PR #4 was built from `main`.
-> Contains no migrations, no application code and no dependencies. The SQL is
-> illustrative design, not files to apply.
+> Revision 4. Revision 3 incorporated the closure review of revision 2 (head
+> `3374bd5`) and a §11 measurement correction made once PR #4 was built from
+> `main`.
+>
+> **Revision 4 synchronises this document with that implementation.** Five
+> things specified here did not behave as written, and each is recorded inline
+> as an amendment rather than quietly corrected:
+>
+> | | Amendment | Section |
+> |---|---|---|
+> | **A** | `ALTER DEFAULT PRIVILEGES … REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` is a silent no-op; explicit per-function revokes plus **Check 24** replace it | §3.2 |
+> | **B** | Check 5a must cover schema **`auth`** as well as `public`; the import role needs it too | §3.2, §5 |
+> | **C** | `apply-all.test.mjs` does **not** pass unchanged; two more tests needed converting | §3.4 |
+> | **D** | The move-out injection needs **four** cases — dropping `WITH CHECK` alone does not open the hole | §6 |
+> | **E** | Rollback deliberately leaves three function ACLs **narrower** than pristine Phase 3, and must write no default privilege | §5 |
+>
+> The SQL below is illustrative design; `supabase/migrations/` holds what is
+> actually applied, and where the two differ an amendment says so.
 >
 > - **Baseline:** merged `main` at `15c9669` — Phase 3 (`3dc59ae`) plus the
 >   Tailwind scope prerequisite, PR #4, now merged.
@@ -257,6 +273,8 @@ revoke execute on function app.forbid_mutation()               from public;
 revoke execute on function app.revoke_api_default_privileges() from public;
 
 -- Future functions in app must not inherit PUBLIC EXECUTE
+-- ⚠️ THIS LINE DOES NOT WORK. See Amendment A below; the implementation omits
+-- it and revokes every function explicitly instead.
 alter default privileges for role postgres in schema app
   revoke execute on functions from public, anon, authenticated;
 
@@ -282,6 +300,53 @@ Two footguns this closes:
   default does not apply to it, so the Check 5 allowlist remains the real
   backstop.
 
+#### Amendment A — the default-privileges line is a silent no-op · **AMENDED IN IMPLEMENTATION**
+
+**`ALTER DEFAULT PRIVILEGES … REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` does
+nothing at all.** Postgres stores a default-ACL row as a *grant list*, and the
+built-in EXECUTE-to-PUBLIC on functions is implicit rather than an entry that
+can be subtracted. The statement records **no row in `pg_default_acl`**, and a
+function created afterwards still lands with owner + PUBLIC.
+
+Measured four ways, in `supabase/tests/phase4-auth.test.mjs`:
+
+| Statement | `pg_default_acl` rows | New function still PUBLIC? |
+|---|---|---|
+| `for role postgres … revoke execute on functions from public` | 0 | **yes** |
+| `in schema app revoke execute on functions from public` | 0 | **yes** |
+| `for role postgres … revoke all on functions from public` | 0 | **yes** |
+| `… revoke execute on functions from public, anon, authenticated` | 0 | **yes** |
+| `for role postgres … grant execute on functions to postgres` *(contrast)* | 1 | — |
+
+This is the RES-001 failure mode exactly: a line that reads like a control and
+does nothing. The implementation's own test caught it — both Phase 4 trigger
+functions were left executable by `PUBLIC`, and `current_app_role()` carried a
+`PUBLIC` grant alongside the intended one.
+
+**What the implementation does instead.** The line is **omitted**, and every
+function in `app` is revoked from `PUBLIC` explicitly, by name, after it exists:
+
+```sql
+revoke execute on function app.touch_updated_at()              from public;
+revoke execute on function app.forbid_mutation()               from public;
+revoke execute on function app.revoke_api_default_privileges() from public;
+revoke execute on function app.forbid_provenance_change()      from public;
+revoke execute on function app.stamp_task_provenance()         from public;
+
+-- Revoked from PUBLIC first, THEN granted: granting alone materialises the ACL
+-- with the implicit PUBLIC entry still in it, leaving the function reachable
+-- by anon.
+revoke execute on function app.current_app_role() from public;
+grant  execute on function app.current_app_role() to authenticated;
+```
+
+**And the durable form of the intent becomes a check, not a statement.**
+**Check 24** asserts that no function in `app` is executable by `PUBLIC` or by
+`anon`, and that exactly one is executable by `authenticated`. That is strictly
+stronger than the line ever was: it also catches a *future* function added
+without a revoke — the case the default-privileges line was supposed to cover
+and never did.
+
 No sequence grants are needed. The only identity column is `audit_log.id`, and
 `authenticated` now reaches that table for nothing at all.
 
@@ -292,6 +357,25 @@ rather than a row-level denial. Phase 3 revoked `all on schema app` but never
 touched `public`, so the privilege is held today and Phase 4 simply relies on
 it. Relying on something unasserted is how it gets revoked by a later cleanup,
 so §3.4 pins it.
+
+#### Amendment B — schema `auth`, not just `public` · **AMENDED IN IMPLEMENTATION**
+
+**`authenticated` must also retain `USAGE` on schema `auth`.** Every policy
+here calls `auth.uid()`, directly or through `app.current_app_role()`, and the
+stamping trigger calls it too. Without USAGE on `auth`, every one of those
+fails with *permission denied for schema auth* — a second silent dependency of
+exactly the same shape as the first, and one revision 3 did not name.
+
+Supabase grants it, as it must for `auth.uid()` to be usable in a policy at
+all. **Check 5a covers both schemas**, and the failure injection revokes each in
+turn.
+
+**This binds the Phase 3 import too.** The stamping trigger calls `auth.uid()`
+before anything else, so **whatever role runs the import needs USAGE on schema
+`auth`**. On Supabase the import runs as `postgres`, which has it. A role
+without it fails with *permission denied for schema auth* — not a
+security-relevant failure, but a confusing one at exactly the wrong moment. It
+is a prerequisite of §5 step 10, recorded there.
 
 ### 3.3 Policies — complete enumeration
 
@@ -360,9 +444,12 @@ the actual `(table, privilege)` set against the literal expected set from
 expected set contains **no row for `audit_log`, `idempotency_keys` or
 `import_batches`.**
 
-**Check 5a — `authenticated` retains `USAGE` on schema `public`.**
-`has_schema_privilege('authenticated', 'public', 'USAGE')` must be true. Phase 4
-depends on it and never grants it (§3.2); without this the dependency is silent.
+**Check 5a — `authenticated` retains `USAGE` on schemas `public` AND `auth`.**
+Both `has_schema_privilege('authenticated', 'public', 'USAGE')` and
+`has_schema_privilege('authenticated', 'auth', 'USAGE')` must be true. Phase 4
+depends on both and grants neither (§3.2, Amendment B); without this the
+dependency is silent. Losing `public` makes every table grant inert; losing
+`auth` makes every policy calling `auth.uid()` fail.
 
 **Check 6 — `anon` holds no privilege on any public table or view.** Phase 3's
 Check 5 already covers `relkind in ('r','p','v','m','f')`, so views are in
@@ -395,7 +482,9 @@ is the one role whose allowlist is empty.
 | `grant update on public.audit_log to authenticated` | Tamper surface |
 | `grant select on public.tasks to anon` | Check 6 |
 | Revoking an *expected* grant | The allowlist must be exact in both directions |
-| `revoke usage on schema public from authenticated` | Check 5a — the silent dependency |
+| `revoke usage on schema public from authenticated` | Check 5a — the silent dependency for table grants |
+| `revoke usage on schema auth from authenticated` | Check 5a — the silent dependency for `auth.uid()` |
+| Create a function in `app` without revoking it from PUBLIC | **Check 24** — the durable form of Amendment A |
 
 **Phase 3 test files that must be amended, by name.** These assert the Phase 3
 posture directly and **will fail the moment PR #5 lands** unless converted in
@@ -410,10 +499,21 @@ them *is* part of the change:
 | `supabase/tests/migrations.test.mjs` | *"ends with RLS enabled, forced, and no api-role privileges on all of them"* | Becomes the Check 5/5a/6 allowlist |
 | `supabase/tests/migrations.test.mjs` | *"does not duplicate constraints, indexes, triggers or policies"* | Extended to cover the 15 new policies on re-run |
 
-`schema.test.mjs`, `parity.test.mjs`, `apply-all.test.mjs`, `import.test.mjs`
-and `secrets.test.mjs` are expected to pass **unchanged**. If any of them needs
-editing, that is a signal Phase 4 changed something it promised not to, and the
-edit needs justifying in review rather than making.
+#### Amendment C — two more conversions were needed · **AMENDED IN IMPLEMENTATION**
+
+The table above named five tests across two files. Two more broke, and the claim
+that `apply-all.test.mjs` passes unchanged was wrong:
+
+| File | Test | Why it broke | Amendment |
+|---|---|---|---|
+| `supabase/tests/apply-all.test.mjs` | *"covers nineteen checks plus a context note and an overall verdict"* | The row count is hard-coded, and this plan itself mandates new checks. **Any** added check breaks it | 21 rows → 27 (25 checks + context + verdict), and it now asserts that 5a and 20–24 are present |
+| `supabase/tests/apply-all.test.mjs` | the *"adds a policy"* / *"anon is granted access"* injections | They match on check *names*, which changed when 4, 5 and 6 were redefined | Rewritten against the new names, plus new cases for the missing-policy and over-grant sides |
+| `supabase/tests/rls.test.mjs` | *"skips with a warning … when membership of the owning role is missing"* | Calls `app.revoke_api_default_privileges()` as a probe role, relying on the `PUBLIC` EXECUTE that §3.2 revokes | The probe role is granted EXECUTE explicitly; the test is about the warning path, not about who may call it |
+
+`schema.test.mjs`, `parity.test.mjs`, `import.test.mjs` and `secrets.test.mjs`
+passed **unchanged**, as promised. If any of *those four* ever needs editing,
+that is a signal Phase 4 changed something it promised not to, and the edit
+needs justifying in review rather than making.
 
 ### 3.5 Policy shape
 
@@ -542,10 +642,12 @@ while the data is exposed.
 | **Check 19** | Unchanged. |
 | Lockdown array | Unchanged — Phase 4 adds **no tables**. |
 | `audit_log` posture | **Unchanged from Phase 3** — RLS forced, zero policies, no grant. Phase 4 adds no access (§1). |
-| Phase 3 test suites | **Green only after Checks 4, 5 and 6 are converted** in the same PR — see the named files in §3.4. |
+| Phase 3 test suites | **Green only after Checks 4, 5 and 6 are converted** in the same PR — `rls.test.mjs`, `migrations.test.mjs` **and `apply-all.test.mjs`** (§3.4, Amendment C). |
 | **Check 4** | **Redefined as an exact, bidirectional policy allowlist** (§3.3, §3.4). |
-| Check 5 / 5a / 6 | **Redefined as exact allowlists** (§3.4). |
+| Check 5 / 5a / 6 | **Redefined as exact allowlists** (§3.4). Check 5a covers schemas `public` **and `auth`** (Amendment B). |
 | Check 17 | See §5. |
+| Phase 3 function ACLs | **Narrowed, and not restored by rollback.** `touch_updated_at`, `forbid_mutation` and `revoke_api_default_privileges` lose `PUBLIC` EXECUTE. Deliberate and pinned by test (Amendment E). |
+| `pg_default_acl` | **Unchanged in both directions.** Phase 4 writes no default privilege (Amendment A) and the rollback writes none either; post-rollback it equals pristine Phase 3 row for row. |
 
 **OVERALL remains an expected FAIL.** RES-001 is unfixable from this project,
 Check 18 reports it honestly, and nothing in Phase 4 changes that. A green
@@ -602,7 +704,7 @@ separate entries with the correct controls.
 | 7 | Run `verify.sql` | manual | — |
 | 8 | MFA **for Fon**; JWT ≤ 1 h; refresh rotation. **Project-wide MFA enforcement stays off** (D5a invariant) | manual | — |
 | 9 | App wiring, CSP, sign-out, external-script test | **PR #6** | `git revert` |
-| 10 | **Import real data — last** | manual | Data retained; `localStorage` untouched |
+| 10 | **Import real data — last.** The importing role needs `USAGE` on schema `auth` (Amendment B): the stamping trigger calls `auth.uid()` before anything else. `postgres` has it | manual | Data retained; `localStorage` untouched |
 | 11 | Re-run `verify.sql` | manual | — |
 
 **Import is deliberately last**, after the session controls in steps 8–9 exist.
@@ -630,6 +732,41 @@ view and function added by Phase 4. Its required properties, each tested:
 - Safe to run twice, and on a database that never had Phase 4.
 - After it runs, the database is back to Phase 3 default-deny — the **safe**
   direction, not the open one.
+- **It must leave no catalog residue.** `pg_default_acl` after rollback must
+  equal `pg_default_acl` in a pristine Phase 3 database, compared row for row.
+
+#### Amendment E — rollback narrows three ACLs on purpose · **AMENDED IN IMPLEMENTATION**
+
+**The rollback is not an exact ACL restoration, and must not be made into one.**
+
+Phase 4 revokes `EXECUTE` from `PUBLIC` on three functions Phase 3 created —
+`app.touch_updated_at()`, `app.forbid_mutation()` and
+`app.revoke_api_default_privileges()`. The rollback **does not undo those
+revokes**, so afterwards those three read `postgres=X/postgres` where pristine
+Phase 3 leaves them at the Postgres default of owner + `PUBLIC`.
+
+That is intentional, and it is the safe direction:
+
+- Re-granting `EXECUTE` to `PUBLIC` for the sake of a tidier catalog diff would
+  hand every role — `anon` included — the ability to call an append-only guard
+  and a privilege-revoking helper. **A rollback must only ever narrow.**
+- Nothing needs the grant. Postgres does not check `EXECUTE` on a trigger
+  function for the triggering user, so Phase 3's triggers keep firing either
+  way. Asserted by test.
+
+**The residual is pinned, not merely described.** `phase4-rollback.test.mjs`
+asserts the exact post-rollback ACL of all three, that pristine Phase 3 differs
+in exactly the stated way, and that no api role can execute them — so the
+difference cannot widen, narrow or drift unnoticed.
+
+**One thing the rollback must NOT do**, found in review: writing
+`alter default privileges … grant execute on functions to public` as the
+"inverse" of Amendment A's line. That statement has no inverse, because it
+never did anything. Writing the GRANT does not restore pristine Phase 3 — it
+**creates** a `pg_default_acl` row handing `PUBLIC` EXECUTE on every future
+`app` function, where pristine Phase 3 has no such row at all. It is a widening
+dressed as a restoration. The rollback contains no `ALTER DEFAULT PRIVILEGES`
+statement of any kind, and a test asserts that.
 
 ### Check 17 changes after import — expected
 
@@ -691,10 +828,38 @@ later as well as the 15 above.
 - **Nothing auto-creates a profile (§2)**
 
 **Failure injection:** every row in §3.4 and §3.8, plus: drop
-`visibility='shared'` → private-task test fails; drop `WITH CHECK` → move-out
-test fails; add a write policy to `profiles` → self-elevation test fails; drop
-the immutability trigger → provenance test fails; **make stamping
-unconditional → the import-preservation test fails.**
+`visibility='shared'` → private-task test fails; add a write policy to
+`profiles` → self-elevation surface appears; drop the immutability trigger →
+provenance test fails; **make stamping unconditional → the import-preservation
+test fails.**
+
+#### Amendment D — the move-out injection needs four cases, not one · **AMENDED IN IMPLEMENTATION**
+
+Revision 3 listed *"drop `WITH CHECK` → move-out test fails"*. **That injection
+does not work**, and a decorative injection is worse than none because it
+certifies a defence nobody has actually tested. Measured:
+
+| Injection | Move-out (`area='school', visibility='private'`) |
+|---|---|
+| Baseline — both predicates intact | **blocked** |
+| `WITH CHECK` **omitted entirely** | **blocked** — Postgres reuses the `USING` expression as the check for the new row |
+| `WITH CHECK` weakened to `true` | **blocked** — Abigail's SELECT policy is applied to the updated row as well |
+| `WITH CHECK` weakened to `true` **and** the SELECT predicate broadened | **move succeeds** |
+
+So the UPDATE `WITH CHECK` and the SELECT predicate are **genuine defence in
+depth**: weakening either one alone changes nothing. Only weakening both opens
+the hole, and only the fourth row is a real injection.
+
+All four cases are asserted in `supabase/tests/phase4-injection.test.mjs`,
+including the two negatives — otherwise a later simplification that removes one
+predicate would look safe because the single-predicate injection still "passes".
+
+**The same applies to self-elevation on `profiles`.** A write policy plus the
+grant is still blocked, by Phase 3's `profiles_one_per_role` unique index rather
+than by anything in Phase 4. Remove the incumbent row and the same two halves
+elevate cleanly. Both cases are asserted, because discovering that the last line
+of defence is an index nobody designed for the job is exactly the sort of thing
+a check should surface rather than hide.
 
 **Suite statement, corrected.** Revision 2 said "all Phase 3 suites green",
 which was wrong as written: three Phase 3 tests assert the *pre-Phase-4*
@@ -702,9 +867,11 @@ posture and **must** go red the moment PR #5 lands. The accurate statement is:
 
 > **All Phase 3 suites are green only after Checks 4, 5 and 6 have been
 > converted to allowlists** — in the same PR, in the files named in §3.4.
-> `schema.test.mjs`, `parity.test.mjs`, `apply-all.test.mjs`,
-> `import.test.mjs` and `secrets.test.mjs` are green **unchanged**; the
-> conversions are confined to `rls.test.mjs` and `migrations.test.mjs`.
+> `schema.test.mjs`, `parity.test.mjs`, `import.test.mjs` and
+> `secrets.test.mjs` are green **unchanged**. The conversions touch
+> `rls.test.mjs`, `migrations.test.mjs` **and `apply-all.test.mjs`** — see
+> Amendment C, which corrects revision 3's claim that the third of those
+> passed untouched.
 
 A Phase 3 test going red is therefore expected exactly once, for exactly these
 assertions. A red anywhere else is a regression, not a conversion.
@@ -981,7 +1148,10 @@ Import happens **after #6**, manually.
 1. Every matrix cell has a passing test, positive and negative.
 2. Every failure injection in §3.4, §3.8 and §6 flips its check to FAIL —
    including **every over-policy injection**, the `profiles` write policy and
-   the unexpected second `tasks` policy among them.
+   the unexpected second `tasks` policy among them. The move-out and
+   self-elevation injections carry **all** their cases, negatives included, so
+   a defence that only appears to be load-bearing is not certified as one
+   (Amendment D).
 3. **Check 18 still FAILs; RES-001 documented unchanged; OVERALL still FAIL.**
 4. Check 19 passes; no new tables; lockdown array unchanged.
 5. **Checks 4, 5, 5a and 6 are exact, bidirectional allowlists:**
@@ -990,23 +1160,31 @@ Import happens **after #6**, manually.
      rejecting both extra and missing policies.
    - **Checks 5 / 6** — the grant sets match §3.2 exactly, rejecting both over-
      and under-grants.
-   - **Check 5a** — `authenticated` retains `USAGE` on schema `public`.
+   - **Check 5a** — `authenticated` retains `USAGE` on schemas `public` **and
+     `auth`** (Amendment B).
+   - **Check 24** — no function in `app` is executable by `PUBLIC` or `anon`,
+     and exactly one by `authenticated` (Amendment A).
 6. Check 20 pins the view definition, covers views and materialized views, and
    has behavioral injections.
 7. `current_app_role()` owner, definer state, empty search path and volatility
    are each asserted; no `profiles` policy references it.
 8. Provenance stamping is app-session-scoped, and **the Phase 3 import
-   preserves `created_by`/`source` exactly**.
+   preserves `created_by`/`source` exactly**. The importing role holds `USAGE`
+   on schema `auth`, because the trigger calls `auth.uid()` (Amendment B).
 9. Nothing auto-creates a `profiles` row.
 10. `anon` and unprofiled users reach zero rows on every table and the view.
 11. No write path to `profiles` for any authenticated role.
 12. Rollback is database-only, **leaves `auth.users` untouched**, safe twice and
-    on a clean database.
+    on a clean database; **leaves `pg_default_acl` equal to pristine Phase 3**
+    and writes no `ALTER DEFAULT PRIVILEGES` of any kind; and its **deliberate
+    narrowing** of the three Phase 3 function ACLs is pinned by test rather than
+    only described (Amendment E).
 13. Secrets sweep clean; no secret in a `VITE_` variable.
 14. **Phase 3 suites green only after Checks 4, 5 and 6 are converted** — the
-    conversions confined to `rls.test.mjs` and `migrations.test.mjs` (§3.4,
-    §6), with `schema`, `parity`, `apply-all`, `import` and `secrets` green
-    **unchanged**. Lint, build and generated-SQL identity green.
+    conversions confined to `rls.test.mjs`, `migrations.test.mjs` **and
+    `apply-all.test.mjs`** (§3.4 Amendment C, §6), with `schema`, `parity`,
+    `import` and `secrets` green **unchanged**. Lint, build and generated-SQL
+    identity green.
 15. **`audit_log`, `idempotency_keys` and `import_batches` carry zero grants and
     zero policies**, and a test proves every role is denied on all three.
 16. **D5a invariant holds:** no policy references `auth.jwt()` assurance level
