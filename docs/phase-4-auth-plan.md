@@ -1129,7 +1129,7 @@ and revision 3 fixes the **order** as well as the numbers:
 |---|---|---|---|
 | **1st** | **#4** | Tailwind scope prerequisite: the two `@source not` lines **and** the corrected adjacent comment (`src/App.css`) | ✅ **Merged as `15c9669`** |
 | **2nd** | **#3** | **This plan document only** — rebased onto the post-#4 `main` ✅, then merged | Draft, rebased, **not yet merged** |
-| **3rd** | **#5** | Database: role function, grants, triggers, policies, view, **Checks 4 / 5 / 5a / 6 / 20**, rollback file, converted `rls.test.mjs` and `migrations.test.mjs` | Not started |
+| **3rd** | **#5** | Database: role function, grants, triggers, policies, view, **Checks 4 / 5 / 5a / 6 / 20**, rollback file, converted `rls.test.mjs`, `migrations.test.mjs` and `apply-all.test.mjs` | Draft, not yet merged |
 | **4th** | **#6** | App wiring: sign-in, session handling, CSP, sign-out, external-script test | Not started |
 
 **PR #3 must not merge before PR #4.** The numbers are creation order, not
