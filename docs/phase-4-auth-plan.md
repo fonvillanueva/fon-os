@@ -2,15 +2,18 @@
 
 > **Status: PLANNING ONLY. Nothing here is implemented.**
 >
-> Revision 2, incorporating an independent review of revision 1. Contains no
-> migrations, no application code and no dependencies. The SQL is illustrative
-> design, not files to apply.
+> Revision 3, incorporating the closure review of revision 2 (head `3374bd5`).
+> Contains no migrations, no application code and no dependencies. The SQL is
+> illustrative design, not files to apply.
 >
 > - **Baseline:** merged `main` at `3dc59ae` (Phase 3).
 > - **Not done:** no Supabase change, no Vercel change, no deploy, no app
 >   connection, no user creation, no data import.
-> - **Decisions D1–D6 are now RESOLVED** and recorded at the end. One
->   sub-question (D5a) is noted because it imposes on another person.
+> - **Decisions D1–D6 are RESOLVED** and recorded at the end. One sub-question
+>   (D5a) remains open because it imposes on another person; revision 3 adds an
+>   **invariant that keeps it genuinely open** rather than silently forced.
+> - **Merge order matters:** prerequisite **PR #4 lands first**; PR #3 is then
+>   rebased and may merge. See §12.
 
 **Design principle:** an account grants nothing. Authorization comes from a
 `profiles` row that only Fon can create. A stray signup lands with zero access
@@ -23,6 +26,8 @@ Constraints:
 - Default deny everywhere.
 - Phase 3's sharing constraint, audit protections, **Check 18 residual
   (RES-001)** and **Check 19** are preserved unchanged.
+- **Phase 4 grants no access to `audit_log`.** Audit reads are deferred to
+  Phase 5, when the app actually has an audit surface (§1, §3.2).
 
 ---
 
@@ -46,10 +51,11 @@ Two consequences:
    work at all. Abigail is blocked from deleting **by the absence of a DELETE
    policy for her**, not by the grant. A reviewer reading only the grants would
    wrongly conclude she can delete.
-2. Phase 3's Check 5 — "anon and authenticated hold no privilege on any public
-   table" — **will necessarily start failing** the moment Phase 4 grants
-   anything. It must be redefined as an exact allowlist, not relaxed or
-   deleted. See §3.3.
+2. Phase 3's Check 4 (*"Zero policies"*), Check 5 (*"anon and authenticated
+   hold no privilege on any public table"*) and Check 6 **will necessarily
+   start failing** the moment Phase 4 adds a policy or a grant. All three must
+   be redefined as **exact, bidirectional allowlists** — not relaxed, not
+   deleted. See §3.4.
 
 ---
 
@@ -136,10 +142,23 @@ not a Phase 4 convenience.
 
 | Role | SELECT | INSERT / UPDATE / DELETE |
 |---|---|---|
-| **fon** | `audit_log` only | ✗ |
-| everyone else | ✗ | ✗ |
+| **every role, including fon** | ✗ | ✗ |
 
-`idempotency_keys` and `import_batches` get no grant and no policy for anyone.
+**All three tables get no grant and no policy for anyone — revised in
+revision 3.** Revision 2 gave Fon a SELECT grant and a SELECT policy on
+`audit_log`. Both are **removed from Phase 4 entirely**.
+
+**Why.** Phase 4 ships no audit surface. Nothing in the app reads the audit
+log, so the grant would buy nothing while permanently widening what a stolen
+Fon session can reach — the audit trail is precisely the record an attacker
+with Fon's session would want to read before deciding what to tamper with.
+Access that no feature consumes is access that only an attacker uses.
+
+**Deferred to Phase 5**, where it can be designed against a real audit view
+with its own column selection, retention answer and read-path test, rather than
+granted speculatively now. Until then the table keeps Phase 3's posture: RLS
+enabled and forced, **zero policies**, reachable only by `service_role` or
+`postgres`.
 
 ---
 
@@ -225,6 +244,9 @@ over-grant and must fail Check 5.**
 ```sql
 -- Schema
 grant usage on schema app to authenticated;
+-- public: NOT granted here. `authenticated` already holds USAGE on schema
+-- public and Phase 3 never revoked it. Phase 4 depends on that silently, so
+-- §3.4 asserts it rather than leaving it as an unstated assumption.
 
 -- Functions: exactly one is reachable
 grant execute on function app.current_app_role() to authenticated;
@@ -241,11 +263,11 @@ grant select, insert, update, delete on public.tasks          to authenticated;
 grant select, insert, update         on public.area_notes     to authenticated;
 grant select                         on public.profiles       to authenticated;
 grant select                         on public.school_summary to authenticated;
-grant select                         on public.audit_log      to authenticated;
 ```
 
-`anon` receives **nothing, anywhere**. `idempotency_keys` and `import_batches`
-receive no grant.
+`anon` receives **nothing, anywhere**. `audit_log`, `idempotency_keys` and
+`import_batches` receive **no grant** — see §1 for why `audit_log` is deferred
+to Phase 5.
 
 Two footguns this closes:
 
@@ -258,33 +280,140 @@ Two footguns this closes:
   default does not apply to it, so the Check 5 allowlist remains the real
   backstop.
 
-No sequence grants are needed: `audit_log.id` is an identity column and
-`authenticated` cannot INSERT there.
+No sequence grants are needed. The only identity column is `audit_log.id`, and
+`authenticated` now reaches that table for nothing at all.
 
-### 3.3 Checks 5 and 6 redefined as exact allowlists
+**`authenticated` must retain `USAGE` on schema `public`.** Table grants are
+unreachable without it — every one of the grants above would silently become
+inert and the app would fail with a confusing *permission denied for schema*
+rather than a row-level denial. Phase 3 revoked `all on schema app` but never
+touched `public`, so the privilege is held today and Phase 4 simply relies on
+it. Relying on something unasserted is how it gets revoked by a later cleanup,
+so §3.4 pins it.
 
-Phase 3's Check 5 asserts `authenticated` holds **no** privilege on any public
-table. Phase 4 necessarily grants privileges, so the check must be redefined —
-**tightened into an exact allowlist, never relaxed**.
+### 3.3 Policies — complete enumeration
 
-- **Check 5 — `authenticated` holds exactly the expected privileges.** Compare
-  the actual `(table, privilege)` set against the literal expected set from
-  §3.2. **Any extra privilege fails; any missing privilege also fails.**
-- **Check 6 — `anon` holds no privilege on any public table or view.**
-  Unchanged in spirit, extended to views.
+**This table is the source of truth for Check 4.** It is deliberately symmetric
+with the grant enumeration in §3.2: that one says which verbs are reachable at
+all, this one says by whom and on which rows. Anything present in the database
+and absent here is an over-policy; anything here and absent from the database is
+a missing control. **Both fail.**
 
-**Over-grant failure injection** (each must flip Check 5 to FAIL):
+Every policy is `PERMISSIVE`, `to authenticated`, and names the app role via
+`(select app.current_app_role())`.
+
+| # | Table | Policy name | Command | Roles | Row predicate (abbreviated) |
+|---|---|---|---|---|---|
+| 1 | `tasks` | `tasks_fon_select` | SELECT | `{authenticated}` | role = `fon` |
+| 2 | `tasks` | `tasks_fon_insert` | INSERT | `{authenticated}` | role = `fon` |
+| 3 | `tasks` | `tasks_fon_update` | UPDATE | `{authenticated}` | role = `fon` |
+| 4 | `tasks` | `tasks_fon_delete` | DELETE | `{authenticated}` | role = `fon` |
+| 5 | `tasks` | `tasks_abigail_select` | SELECT | `{authenticated}` | role = `abigail` ∧ `area ∈ (family, home)` ∧ `visibility = 'shared'` |
+| 6 | `tasks` | `tasks_abigail_insert` | INSERT | `{authenticated}` | same, in `WITH CHECK` |
+| 7 | `tasks` | `tasks_abigail_update` | UPDATE | `{authenticated}` | same, in **both** `USING` and `WITH CHECK` |
+| 8 | `area_notes` | `area_notes_fon_select` | SELECT | `{authenticated}` | role = `fon` |
+| 9 | `area_notes` | `area_notes_fon_insert` | INSERT | `{authenticated}` | role = `fon` |
+| 10 | `area_notes` | `area_notes_fon_update` | UPDATE | `{authenticated}` | role = `fon` |
+| 11 | `area_notes` | `area_notes_abigail_select` | SELECT | `{authenticated}` | role = `abigail` ∧ `area ∈ (family, home)` |
+| 12 | `area_notes` | `area_notes_abigail_insert` | INSERT | `{authenticated}` | same, in `WITH CHECK` |
+| 13 | `area_notes` | `area_notes_abigail_update` | UPDATE | `{authenticated}` | same, both clauses |
+| 14 | `area_notes` | `area_notes_accountability_select` | SELECT | `{authenticated}` | role = `accountability` ∧ `area = 'school'` |
+| 15 | `profiles` | `profiles_select_own` | SELECT | `{authenticated}` | `user_id = (select auth.uid())` — **must not** call `current_app_role()` (§3.1) |
+
+**Exactly 15 policies. Nothing else, on any table.**
+
+| Table | Expected policy count | Why |
+|---|---|---|
+| `tasks` | 7 | No DELETE for abigail (D1); no accountability policy at all |
+| `area_notes` | 7 | No DELETE for anyone |
+| `profiles` | 1 | Read-own only; no write path ever (D3) |
+| **`audit_log`** | **0** | **Deferred to Phase 5 (§1)** |
+| `idempotency_keys` | 0 | Server-side only |
+| `import_batches` | 0 | Server-side only |
+
+Three absences are load-bearing and easy to mistake for oversights, so they are
+stated rather than implied: **accountability holds no policy on `tasks`** (it
+reads only the view, §3.7); **abigail holds no DELETE** (D1); **no role holds
+any policy on `audit_log`** (§1).
+
+### 3.4 Checks 4, 5 and 6 redefined as exact, bidirectional allowlists
+
+Phase 3's Check 4 asserts **zero policies** and Checks 5/6 assert **zero
+privileges** for `anon` and `authenticated`. Phase 4 necessarily adds both, so
+all three must be redefined — **tightened into exact allowlists, never
+relaxed**. A check rewritten to `count(*) >= 0` is how a board goes green while
+the boundary rots.
+
+**Check 4 — the policy set matches §3.3 exactly.** The comparison is a full
+outer join between the actual and expected sets, keyed on
+**`(tablename, policyname, cmd, roles)`**, and it additionally pins
+`permissive = 'PERMISSIVE'` — a policy silently switched to `RESTRICTIVE`
+keeps its key but inverts its meaning. **An unmatched row on either side
+fails**, and the detail column names which side and which policy, so a failure
+says *what* drifted rather than only *that* something did.
+
+**Check 5 — `authenticated` holds exactly the expected privileges.** Compare
+the actual `(table, privilege)` set against the literal expected set from
+§3.2. **Any extra privilege fails; any missing privilege also fails.** The
+expected set contains **no row for `audit_log`, `idempotency_keys` or
+`import_batches`.**
+
+**Check 5a — `authenticated` retains `USAGE` on schema `public`.**
+`has_schema_privilege('authenticated', 'public', 'USAGE')` must be true. Phase 4
+depends on it and never grants it (§3.2); without this the dependency is silent.
+
+**Check 6 — `anon` holds no privilege on any public table or view.** Phase 3's
+Check 5 already covers `relkind in ('r','p','v','m','f')`, so views are in
+scope today; Check 6 reads `information_schema.role_table_grants`, which also
+includes views. Unchanged in substance, and it must stay at **zero** — `anon`
+is the one role whose allowlist is empty.
+
+**Over-policy failure injection** (each must flip **Check 4** to FAIL):
+
+| Injection | Why it matters |
+|---|---|
+| `create policy profiles_self_update on public.profiles for update to authenticated using (user_id = (select auth.uid()))` | **The self-elevation surface (T1).** Must fail Check 4 *and* flip the D3 behavioral test — a policy alone is not enough to elevate without a grant, which is exactly why the catalog check must catch it before someone later adds the grant. |
+| `create policy tasks_extra_select on public.tasks for select to authenticated using (true)` | **An unexpected second `tasks` policy.** Permissive policies are OR-ed, so one `using (true)` silently defeats every other row predicate. Must fail Check 4 *and* a behavioral test showing Abigail reading Work. |
+| `create policy audit_log_fon_select on public.audit_log …` | The access revision 3 deliberately removed, re-added by habit |
+| `create policy … on public.idempotency_keys …` | A server-side table reachable from the API |
+| Drop `tasks_abigail_update` | **Missing** side of the allowlist |
+| Rename `tasks_fon_delete` | Fails as both extra *and* missing |
+| Change `tasks_fon_select` to `for all` | Command drift under an unchanged name |
+| Change a policy's roles to `public` | Role drift under an unchanged name |
+| Recreate `profiles_select_own` as `restrictive` | Same key, inverted meaning |
+
+**Over-grant failure injection** (each must flip **Check 5** or **6** to FAIL):
 
 | Injection | Why it matters |
 |---|---|
 | `grant delete on public.area_notes to authenticated` | A verb no role should have |
 | `grant select on public.import_batches to authenticated` | A table no role should reach |
 | `grant insert on public.profiles to authenticated` | The self-elevation surface |
+| `grant select on public.audit_log to authenticated` | **Re-adding the Phase 4 access removed in revision 3** |
 | `grant update on public.audit_log to authenticated` | Tamper surface |
 | `grant select on public.tasks to anon` | Check 6 |
 | Revoking an *expected* grant | The allowlist must be exact in both directions |
+| `revoke usage on schema public from authenticated` | Check 5a — the silent dependency |
 
-### 3.4 Policy shape
+**Phase 3 test files that must be amended, by name.** These assert the Phase 3
+posture directly and **will fail the moment PR #5 lands** unless converted in
+the same PR. They are not collateral damage to be fixed afterwards; converting
+them *is* part of the change:
+
+| File | Test | Required amendment |
+|---|---|---|
+| `supabase/tests/rls.test.mjs` | *"defines no policies at all — the denial is structural, not a rule to remove later"* | Becomes the Check 4 allowlist: the policy set equals §3.3 exactly, both directions |
+| `supabase/tests/rls.test.mjs` | *"a signed-in user reaches nothing before Phase 4"* (suite) | Retitled and split: `anon` and **unprofiled** users still reach nothing; profiled users reach exactly their matrix row |
+| `supabase/tests/rls.test.mjs` | *"denies authenticated the internal app schema"* | Narrowed: `authenticated` holds `USAGE` on `app` and `EXECUTE` on `current_app_role()` **only**, and still cannot execute the other three functions |
+| `supabase/tests/migrations.test.mjs` | *"ends with RLS enabled, forced, and no api-role privileges on all of them"* | Becomes the Check 5/5a/6 allowlist |
+| `supabase/tests/migrations.test.mjs` | *"does not duplicate constraints, indexes, triggers or policies"* | Extended to cover the 15 new policies on re-run |
+
+`schema.test.mjs`, `parity.test.mjs`, `apply-all.test.mjs`, `import.test.mjs`
+and `secrets.test.mjs` are expected to pass **unchanged**. If any of them needs
+editing, that is a signal Phase 4 changed something it promised not to, and the
+edit needs justifying in review rather than making.
+
+### 3.5 Policy shape
 
 ```sql
 create policy tasks_abigail_select on public.tasks
@@ -304,7 +433,7 @@ Abigail's write policies repeat the predicate in `WITH CHECK`, so the
 *resulting* row must also satisfy it. That blocks move-out, unshare, and
 unshare-then-move.
 
-### 3.5 Provenance: stamping scoped to app sessions
+### 3.6 Provenance: stamping scoped to app sessions
 
 Two triggers on `public.tasks`.
 
@@ -342,7 +471,7 @@ match the export byte for byte, including `pong-voice` and `claude-import`.
 Plus the negative: an app-session insert claiming `created_by='fon'` from
 Abigail's session is stamped back to `abigail`.
 
-### 3.6 View design
+### 3.7 View design
 
 ```sql
 create view public.school_summary
@@ -355,7 +484,8 @@ where area = 'school'
 
 - **`security_invoker = false`** — the view runs as its owner and bypasses
   `tasks` RLS by design, which is how accountability reads School rows while
-  holding no `tasks` policy. The role filter therefore lives *inside* the view.
+  holding no `tasks` policy (§3.3, rows 1–7 are `fon` and `abigail` only). The
+  role filter therefore lives *inside* the view.
 - **`security_barrier = true`** — **added in revision 2.** Without it, Postgres
   may push a user-supplied `WHERE` predicate *below* the view's own filter. A
   cheap leaky function in a predicate could then observe rows the filter was
@@ -364,7 +494,7 @@ where area = 'school'
   rows.
 - Owner: `postgres`, tested.
 
-### 3.7 Check 20 — views, strengthened
+### 3.8 Check 20 — views, strengthened
 
 Revision 1's Check 20 only asserted `security_invoker`. That is too weak: a
 definer view whose role filter was *edited away* would still pass.
@@ -384,7 +514,9 @@ Check 20 asserts all of:
    the rule is a flat prohibition rather than a property check.
 5. Every view's owner is `postgres`.
 
-**Behavioral failure injection** — not just property injection:
+**Behavioral failure injection** — not just property injection. Check 20 covers
+views; **Check 4 covers policies** (§3.4) and the two are independent, because a
+view needs no policy to leak:
 
 | Injection | Expected |
 |---|---|
@@ -398,7 +530,7 @@ Check 20 asserts all of:
 The behavioral half matters: a check that only reads catalog metadata can pass
 while the data is exposed.
 
-### 3.8 Preserving Phase 3
+### 3.9 Preserving Phase 3
 
 | Phase 3 property | Phase 4 effect |
 |---|---|
@@ -407,7 +539,10 @@ while the data is exposed.
 | **Check 18 / RES-001** | **Unchanged — still FAIL, still not softened.** |
 | **Check 19** | Unchanged. |
 | Lockdown array | Unchanged — Phase 4 adds **no tables**. |
-| Check 5 / 6 | **Redefined as exact allowlists** (§3.3). |
+| `audit_log` posture | **Unchanged from Phase 3** — RLS forced, zero policies, no grant. Phase 4 adds no access (§1). |
+| Phase 3 test suites | **Green only after Checks 4, 5 and 6 are converted** in the same PR — see the named files in §3.4. |
+| **Check 4** | **Redefined as an exact, bidirectional policy allowlist** (§3.3, §3.4). |
+| Check 5 / 5a / 6 | **Redefined as exact allowlists** (§3.4). |
 | Check 17 | See §5. |
 
 **OVERALL remains an expected FAIL.** RES-001 is unfixable from this project,
@@ -439,14 +574,16 @@ separate entries with the correct controls.
 | T11 | **Over-grant creep** — a later migration grants too much | Check 5 exact allowlist + over-grant injection | Only as good as the check |
 | T12 | **Leaky-function predicate on the view** | `security_barrier = true` | None known |
 | T13 | **Session theft** (XSS, shared device) | **CSP**, JWT expiry ≤ 1 h, refresh-token rotation, explicit sign-out (§7). **Not MFA.** | Real but bounded. A stolen token expires within the hour and cannot be refreshed after rotation detects reuse. |
-| T14 | **Credential compromise** (password reuse, phishing) | **TOTP MFA** (D5) | Fon covered before import; others per D5a |
-| T15 | **Audit tampering** | Append-only triggers, all roles | `DROP TABLE` needs owner |
+| T14 | **Credential compromise** (password reuse, phishing) | **TOTP MFA** (D5). **No policy may gate on an MFA assurance claim** while D5a is open — see the D5a invariant | Fon covered before import; Abigail and accountability remain exposed until D5a is decided |
+| T15 | **Audit tampering** | Append-only triggers, all roles; **no API role holds any grant or policy on `audit_log`** (§1) | `DROP TABLE` needs owner |
+| T15a | **Audit *reading* by a stolen session** | **Removed as a Phase 4 capability in revision 3.** No grant, no policy; reachable only by `service_role`/`postgres`. Check 4 and Check 5 both fail if either is re-added | None in Phase 4. Re-opens in Phase 5 and must be designed there, not inherited |
 | T16 | **Materialized view over `tasks`** | RLS does not apply to matviews; Check 20 forbids them in `public` | None while checked |
 | T17 | **Import rewrites provenance** | Stamping scoped to app sessions; import-preservation test | None |
 | T18 | **`service_role` reaches the browser** | Never in a `VITE_` variable; `secrets.test.mjs` | None |
 | T19 | **Auto-provisioned profile** | Tests assert nothing creates profiles (§2) | None while checked |
 | T20 | **RES-001** | Check 18 (detect) + Check 19 (compensate) | Accepted, unchanged |
 | T21 | **Pong as a user** | `profiles_role_valid` rejects `'pong'`; no auth user | None |
+| T22 | **Lockout by assurance gating** — a policy or project setting requires `aal2`, locking out whoever has not enrolled | **D5a invariant:** no PR #5 policy may reference `auth.jwt()` assurance level or any MFA claim, and project-wide MFA enforcement stays **off** while D5a is open. Asserted by test | None while asserted. Revisit deliberately when D5a is decided |
 
 ---
 
@@ -454,20 +591,28 @@ separate entries with the correct controls.
 
 | # | Step | PR / manual | Reversible by |
 |---|---|---|---|
-| 1 | Tailwind scope prerequisite | **PR #4** | `git revert` |
-| 2 | Disable public sign-ups | manual | Re-enable |
-| 3 | Create three auth users | manual | Delete users (manual, never scripted) |
-| 4 | DB migration: role function, grants, triggers, policies, view, Check 20, Checks 5/6 | **PR #5** | `supabase/rollback-phase-4.sql` |
-| 5 | Insert three `profiles` rows | manual SQL | `delete from public.profiles` |
-| 6 | Run `verify.sql` | manual | — |
-| 7 | MFA for Fon; JWT ≤ 1 h; refresh rotation | manual | — |
-| 8 | App wiring, CSP, sign-out, external-script test | **PR #6** | `git revert` |
-| 9 | **Import real data — last** | manual | Data retained; `localStorage` untouched |
-| 10 | Re-run `verify.sql` | manual | — |
+| 1 | Tailwind scope prerequisite — **lands before PR #3 merges** | **PR #4** | `git revert` |
+| 2 | Rebase PR #3 onto the post-#4 `main`, then merge the plan | — | `git revert` |
+| 3 | Disable public sign-ups | manual | Re-enable |
+| 4 | Create three auth users | manual | Delete users (manual, never scripted) |
+| 5 | DB migration: role function, grants, triggers, policies, view, **Checks 4 / 5 / 5a / 6 / 20**, converted Phase 3 suites | **PR #5** | `supabase/rollback-phase-4.sql` |
+| 6 | Insert three `profiles` rows | manual SQL | `delete from public.profiles` |
+| 7 | Run `verify.sql` | manual | — |
+| 8 | MFA **for Fon**; JWT ≤ 1 h; refresh rotation. **Project-wide MFA enforcement stays off** (D5a invariant) | manual | — |
+| 9 | App wiring, CSP, sign-out, external-script test | **PR #6** | `git revert` |
+| 10 | **Import real data — last** | manual | Data retained; `localStorage` untouched |
+| 11 | Re-run `verify.sql` | manual | — |
 
-**Import is deliberately last**, after the session controls in step 7–8 exist.
+**Import is deliberately last**, after the session controls in steps 8–9 exist.
 Revision 1 had it before app wiring; the review was right that real data should
 not enter a system whose session handling is not yet hardened.
+
+**PR #4 is deliberately first, ahead of this plan's own merge.** Until the
+Tailwind exclusions land, any change under `docs/` — including this document —
+alters the shipped CSS bundle. Merging PR #3 first would put a documentation
+change into `main` that silently changes production CSS, which is the exact
+defect PR #4 exists to remove. So: **#4, then rebase and merge #3, then #5,
+then #6.**
 
 ### Rollback is database-only
 
@@ -486,11 +631,15 @@ view and function added by Phase 4. Its required properties, each tested:
 
 ### Check 17 changes after import — expected
 
+
 Check 17 reads *"No task data present yet (schema only, as expected in
-Phase 3)"*. It is written `PASS` at zero rows, else `NOTE`. After step 9 it
+Phase 3)"*. It is written `PASS` at zero rows, else `NOTE`. After step 10 it
 becomes **NOTE with a row count**. `NOTE` carries no status weight, so OVERALL
 is unaffected. This is expected and must not be mistaken for a regression; the
 check's wording should be updated in PR #5 to describe both phases.
+
+Step numbers above shifted by one from revision 2, because the PR #3 rebase-and-
+merge is now an explicit step rather than an assumption.
 
 ---
 
@@ -503,6 +652,18 @@ Real Postgres via PGlite, offline, no credentials. The harness gains an
 **Function properties (§3.1):** owner is `postgres`; `prosecdef` true;
 `proconfig` contains an empty `search_path`; `provolatile` is `s`; no policy on
 `profiles` references the function name.
+
+**Catalog shape (§3.3, §3.4):** the policy set equals the 15 rows of §3.3
+exactly, keyed on `(tablename, policyname, cmd, roles)` and pinned to
+`PERMISSIVE`, failing on an unmatched row from **either** side; the grant set
+equals §3.2 exactly; `authenticated` holds `USAGE` on schema `public`;
+`audit_log`, `idempotency_keys` and `import_batches` carry **zero** policies and
+**zero** grants.
+
+**D5a invariant:** no policy expression anywhere references `auth.jwt()`,
+`aal1`, `aal2` or any assurance-level claim. Asserted by scanning every
+`pg_policies.qual` and `with_check` expression, so it holds for policies added
+later as well as the 15 above.
 
 **Positive:** each role reaches precisely its matrix row, no more.
 
@@ -521,23 +682,38 @@ Real Postgres via PGlite, offline, no credentials. The harness gains an
 - Unprofiled user → 0 rows on every table and the view
 - `anon` → permission denied on every table and the view
 - Every role attempts write on `profiles` → denied; each reads only its own row
+- **Every role selects `audit_log` → permission denied (no grant, no policy)**
+- **Every role selects `idempotency_keys` / `import_batches` → permission denied**
 - Provenance immutability → rejected for all roles
-- **Phase 3 import preserves `created_by`/`source` byte for byte (§3.5)**
+- **Phase 3 import preserves `created_by`/`source` byte for byte (§3.6)**
 - **Nothing auto-creates a profile (§2)**
 
-**Failure injection:** every row in §3.3 and §3.7, plus: drop
+**Failure injection:** every row in §3.4 and §3.8, plus: drop
 `visibility='shared'` → private-task test fails; drop `WITH CHECK` → move-out
 test fails; add a write policy to `profiles` → self-elevation test fails; drop
 the immutability trigger → provenance test fails; **make stamping
 unconditional → the import-preservation test fails.**
 
-Plus all Phase 3 suites green and **a test asserting Check 18 still FAILs**.
+**Suite statement, corrected.** Revision 2 said "all Phase 3 suites green",
+which was wrong as written: three Phase 3 tests assert the *pre-Phase-4*
+posture and **must** go red the moment PR #5 lands. The accurate statement is:
+
+> **All Phase 3 suites are green only after Checks 4, 5 and 6 have been
+> converted to allowlists** — in the same PR, in the files named in §3.4.
+> `schema.test.mjs`, `parity.test.mjs`, `apply-all.test.mjs`,
+> `import.test.mjs` and `secrets.test.mjs` are green **unchanged**; the
+> conversions are confined to `rls.test.mjs` and `migrations.test.mjs`.
+
+A Phase 3 test going red is therefore expected exactly once, for exactly these
+assertions. A red anywhere else is a regression, not a conversion.
+
+Plus **a test asserting Check 18 still FAILs**.
 
 ---
 
 ## 7. Session and browser controls — required before real data import
 
-These are **blocking prerequisites for step 9**, not polish.
+These are **blocking prerequisites for step 10** (the import), not polish.
 
 | Control | Requirement | Where |
 |---|---|---|
@@ -579,7 +755,8 @@ One at a time, each confirmed before the next.
    never passwords.
 3. **Authentication → Sessions → JWT expiry ≤ 1 hour; enable refresh-token
    rotation with reuse detection.**
-4. **Fon enrolls TOTP MFA** (D5) — before step 9 of §5.
+4. **Fon enrolls TOTP MFA** (D5) — before step 10 of §5. **Leave project-wide
+   MFA enforcement OFF** while D5a is open (the D5a invariant).
 5. **Project Settings → API → copy Project URL and publishable key** into Vercel
    environment variables. Fon does this; the values are never needed here.
 
@@ -647,6 +824,21 @@ Add to `src/App.css`, beside the existing `supabase/` exclusion:
 @source not "../scripts";
 ```
 
+**The adjacent comment must be corrected in the same commit.** `src/App.css`
+currently explains the single `supabase/` exclusion like this:
+
+> *Only supabase/ is excluded, deliberately: docs/ and scripts/ were already
+> being scanned before Phase 3, and excluding them too would change the shipped
+> CSS. This keeps the built stylesheet byte-identical to main.*
+
+Every clause of that becomes false the moment the two lines above are added —
+it names the exclusion as deliberate, gives a reason that no longer holds, and
+claims a byte-identity property the change itself retires. A comment that
+contradicts the three lines under it is worse than no comment, because the next
+reader trusts it. PR #4 rewrites it to state what is actually true: all three
+directories are excluded, documentation and scripts are not stylesheet inputs,
+and the byte-identity baseline is the post-#4 build (below).
+
 ### Measured effect
 
 Computed by building with and without the exclusion:
@@ -675,6 +867,9 @@ unused-looking:
   the `.visible` *utility*; they are unrelated, and `.visible` is retained
   anyway.
 - A rendering check at desktop and iPhone widths before and after.
+- **The adjacent comment is rewritten, not left stale** — no sentence in
+  `src/App.css` may still claim `docs/` and `scripts/` are scanned, or that the
+  bundle is byte-identical to `main`.
 
 **No security impact. No rendering impact.**
 
@@ -693,26 +888,40 @@ onward:
 
 ---
 
-## 12. PR sequence — renumbered, no shared numbers
+## 12. PR sequence and merge order
 
-Revision 1 used "PR #3" for both this plan and the database work. Corrected:
+Revision 1 used "PR #3" for both this plan and the database work. Corrected,
+and revision 3 fixes the **order** as well as the numbers:
 
-| PR | Contents | State |
-|---|---|---|
-| **#3** | **This plan document only** | Draft, planning only |
-| **#4** | Tailwind scope prerequisite (`src/App.css`) | Not started |
-| **#5** | Database: role function, grants, triggers, policies, view, Checks 5/6/20, rollback file, tests | Not started |
-| **#6** | App wiring: sign-in, session handling, CSP, sign-out, external-script test | Not started |
+| Order | PR | Contents | State |
+|---|---|---|---|
+| **1st** | **#4** | Tailwind scope prerequisite: the two `@source not` lines **and** the corrected adjacent comment (`src/App.css`) | Not started |
+| **2nd** | **#3** | **This plan document only** — rebased onto the post-#4 `main`, then merged | Draft, planning only |
+| **3rd** | **#5** | Database: role function, grants, triggers, policies, view, **Checks 4 / 5 / 5a / 6 / 20**, rollback file, converted `rls.test.mjs` and `migrations.test.mjs` | Not started |
+| **4th** | **#6** | App wiring: sign-in, session handling, CSP, sign-out, external-script test | Not started |
+
+**PR #3 must not merge before PR #4.** The numbers are creation order, not
+merge order, and they disagree here. Until #4 lands, every change under `docs/`
+alters the shipped CSS — so merging this plan first would land a documentation
+commit that changes production CSS, which is the precise defect #4 removes.
 
 Import happens **after #6**, manually.
 
 ### Acceptance criteria — PR #5 (database)
 
 1. Every matrix cell has a passing test, positive and negative.
-2. Every failure injection in §3.3, §3.7 and §6 flips its check to FAIL.
+2. Every failure injection in §3.4, §3.8 and §6 flips its check to FAIL —
+   including **every over-policy injection**, the `profiles` write policy and
+   the unexpected second `tasks` policy among them.
 3. **Check 18 still FAILs; RES-001 documented unchanged; OVERALL still FAIL.**
 4. Check 19 passes; no new tables; lockdown array unchanged.
-5. Checks 5 and 6 are exact allowlists and reject both over- and under-grants.
+5. **Checks 4, 5, 5a and 6 are exact, bidirectional allowlists:**
+   - **Check 4** — the policy set matches the 15 rows of §3.3, keyed on
+     `(table, policy name, command, roles)` and pinned to `PERMISSIVE`,
+     rejecting both extra and missing policies.
+   - **Checks 5 / 6** — the grant sets match §3.2 exactly, rejecting both over-
+     and under-grants.
+   - **Check 5a** — `authenticated` retains `USAGE` on schema `public`.
 6. Check 20 pins the view definition, covers views and materialized views, and
    has behavioral injections.
 7. `current_app_role()` owner, definer state, empty search path and volatility
@@ -725,9 +934,18 @@ Import happens **after #6**, manually.
 12. Rollback is database-only, **leaves `auth.users` untouched**, safe twice and
     on a clean database.
 13. Secrets sweep clean; no secret in a `VITE_` variable.
-14. Full suite, lint, build, generated-SQL identity green.
-15. Bundle byte-identical to the **post-PR-#4 baseline**.
-16. Nothing merged, deployed, connected or imported.
+14. **Phase 3 suites green only after Checks 4, 5 and 6 are converted** — the
+    conversions confined to `rls.test.mjs` and `migrations.test.mjs` (§3.4,
+    §6), with `schema`, `parity`, `apply-all`, `import` and `secrets` green
+    **unchanged**. Lint, build and generated-SQL identity green.
+15. **`audit_log`, `idempotency_keys` and `import_batches` carry zero grants and
+    zero policies**, and a test proves every role is denied on all three.
+16. **D5a invariant holds:** no policy references `auth.jwt()` assurance level
+    or any MFA claim, and project-wide MFA enforcement is off.
+17. Bundle byte-identical to the **post-PR-#4 baseline**.
+18. **PR #4 has already merged, and PR #3 was rebased onto it and merged**,
+    before this PR opens.
+19. Nothing merged, deployed, connected or imported.
 
 ### Acceptance criteria — PR #6 (app wiring)
 
@@ -772,7 +990,7 @@ boundary must stand alone.
 
 ### D5 — MFA · RESOLVED
 
-**Fon enrolls TOTP MFA before real data import** (§5 step 7, §9 step 4).
+**Fon enrolls TOTP MFA before real data import** (§5 step 8, §9 step 4).
 
 **D5a — open sub-question for Fon.** The recommendation is that Abigail and the
 accountability viewer **also enroll at account creation**, because MFA
@@ -780,6 +998,33 @@ retrofitted later is the step that never happens. This imposes a requirement on
 other people, so it is Fon's call, not this plan's. If either does not enroll,
 they remain gated by invite-only enrollment, the profile-row requirement and
 the policies; the residual is credential compromise (T14) for that person only.
+
+#### The D5a invariant — added in revision 3
+
+An open decision quietly becomes a closed one if the implementation starts
+depending on one answer. Two things in PR #5 would do exactly that, so both are
+prohibited while D5a is undecided:
+
+1. **No PR #5 policy may reference `auth.jwt()` assurance level or any MFA
+   assurance claim** — no `aal1`, no `aal2`, no
+   `auth.jwt()->>'aal'`, no equivalent. A policy that requires `aal2` would
+   silently return **zero rows** to whoever has not enrolled: not an access
+   error, not a prompt, just an empty board that looks like data loss. §6
+   asserts this by scanning every policy expression, so it also binds policies
+   written later.
+2. **Project-wide MFA enforcement stays off** in the Supabase dashboard while
+   enrollment for Abigail and accountability is undecided. Turning it on
+   without their enrollment locks them out of sign-in entirely — and the person
+   it would not inconvenience is Fon, who has already enrolled, which is
+   precisely why it is easy to switch on without noticing who it hurts (T22).
+
+**Fon's own requirement is unchanged:** TOTP enrollment before real data import
+(§5 step 8, §9 step 4). Fon enrolling is an individual act that costs nobody
+else anything. Requiring it of others is a decision about other people, and it
+stays open until they are actually asked.
+
+Both prohibitions lift the moment D5a is decided — in either direction. This is
+a hold, not a position on the answer.
 
 **Threat-model correction:** MFA mitigates **credential compromise (T14)**.
 Session theft (T13) is mitigated by **CSP, short JWT lifetime, refresh-token
