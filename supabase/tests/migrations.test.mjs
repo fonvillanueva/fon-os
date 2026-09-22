@@ -61,14 +61,17 @@ describe("every table a migration creates is explicitly locked down", () => {
     expect(missing, `tables created but not locked down: ${missing.join(", ")}`).toEqual([]);
   });
 
-  it("ends with RLS enabled, forced, and no api-role privileges on all of them", async () => {
+  // Phase 3 asserted that neither api role held anything anywhere. Phase 4
+  // grants `authenticated` a narrow set, so this becomes an exact allowlist:
+  // extra fails, and missing fails too. `anon` stays at zero in both phases —
+  // it is the one role whose allowlist is empty.
+  it("ends with RLS enabled and forced, anon holding nothing, and authenticated holding exactly the expected set", async () => {
     db = await freshDb();
     const { rows } = await db.query(`
       select c.relname,
              c.relrowsecurity as enabled,
              c.relforcerowsecurity as forced,
-             has_table_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as anon_any,
-             has_table_privilege('authenticated', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as auth_any
+             has_table_privilege('anon', c.oid, 'SELECT, INSERT, UPDATE, DELETE') as anon_any
         from pg_class c join pg_namespace n on n.oid = c.relnamespace
        where n.nspname = 'public' and c.relkind = 'r'
     `);
@@ -78,8 +81,34 @@ describe("every table a migration creates is explicitly locked down", () => {
       expect(r.enabled, `${r.relname} RLS`).toBe(true);
       expect(r.forced, `${r.relname} FORCE`).toBe(true);
       expect(r.anon_any, `${r.relname} anon`).toBe(false);
-      expect(r.auth_any, `${r.relname} authenticated`).toBe(false);
     }
+
+    const { rows: granted } = await db.query(`
+      select c.relname, p.priv
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        cross join (values ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),
+                           ('TRUNCATE'),('REFERENCES'),('TRIGGER')) p(priv)
+       where n.nspname = 'public' and c.relkind in ('r','p','v','m','f')
+         and has_table_privilege('authenticated', c.oid, p.priv)
+       order by c.relname, p.priv
+    `);
+    expect(granted.map((r) => `${r.relname}.${r.priv}`)).toEqual([
+      "area_notes.INSERT", "area_notes.SELECT", "area_notes.UPDATE",
+      "profiles.SELECT",
+      "school_summary.SELECT",
+      "tasks.DELETE", "tasks.INSERT", "tasks.SELECT", "tasks.UPDATE",
+    ]);
+  });
+
+  // The dependency Phase 4 relies on and never grants.
+  it("leaves authenticated holding USAGE on schemas public and auth", async () => {
+    db = await freshDb();
+    const { rows } = await db.query(`
+      select has_schema_privilege('authenticated','public','USAGE') as pub,
+             has_schema_privilege('authenticated','auth','USAGE') as auth
+    `);
+    expect(rows[0]).toEqual({ pub: true, auth: true });
   });
 
   it("does not install a DDL event trigger — rejected in review as fail-open", async () => {
@@ -125,7 +154,9 @@ describe("re-running migrations is safe", () => {
     const before = await count();
     await applyMigrations(db);
     expect(await count()).toEqual(before);
-    expect(before.policies).toBe(0);
+    // Phase 4's fifteen policies are created with `drop policy if exists`
+    // first, so a second run neither duplicates nor drops them.
+    expect(before.policies).toBe(15);
   });
 
   it("preserves existing rows when re-run", async () => {
@@ -181,7 +212,9 @@ describe("rollback and recovery", () => {
     await applyMigrations(db);
 
     expect(await schemaSnapshot(db)).toEqual(before);
+    // Phase 4's policies come back with the migrations, so the rebuilt database
+    // is authorized exactly as before rather than left open or left shut.
     const { rows } = await db.query("select count(*)::int n from pg_policies where schemaname='public'");
-    expect(rows[0].n).toBe(0);
+    expect(rows[0].n).toBe(15);
   });
 });

@@ -14,7 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MIGRATIONS = join(ROOT, "supabase", "migrations");
 export const APPLY_ALL = join(ROOT, "supabase", "apply-all.sql");
 
-const HEADER = `-- ─── FON'S OS — PHASE 3 SCHEMA ────────────────────────────────────────────────
+const HEADER = `-- ─── FON'S OS — DATABASE SCHEMA (PHASE 3 + PHASE 4) ──────────────────────────
 --
 -- GENERATED FILE. Do not edit by hand.
 -- Source: supabase/migrations/*.sql   Rebuild: npm run db:build-apply-all
@@ -23,13 +23,19 @@ const HEADER = `-- ─── FON'S OS — PHASE 3 SCHEMA ───────�
 --   psql "$SUPABASE_DB_URL" -f supabase/apply-all.sql
 --
 -- Safe to run more than once: every statement is guarded, so re-running is a
--- no-op and will not duplicate a constraint, index or trigger, or disturb rows.
+-- no-op and will not duplicate a constraint, index, trigger or policy, or
+-- disturb rows.
 --
--- This creates tables with RLS enabled, forced, and NO policies. That denies
--- every row to every role except one holding BYPASSRLS. Nothing can read the
--- board until Phase 4 adds policies. That is intended.
+-- Phase 3 creates the tables with RLS enabled and FORCED. Phase 4 adds the
+-- first policies: fifteen of them, every one scoped to a person's role in
+-- public.profiles. An account with no profiles row still reaches nothing, and
+-- nothing here creates one — enrolment stays a deliberate manual step.
 --
--- Afterwards, run supabase/verify.sql to confirm the result.
+-- NOT granted by this file: any access to audit_log, idempotency_keys or
+-- import_batches; any write path to profiles; any DELETE for Abigail.
+--
+-- Afterwards, run supabase/verify.sql to confirm the result. Check 18 is
+-- EXPECTED to FAIL on Supabase — accepted residual RES-001.
 `;
 
 export async function buildApplyAll() {

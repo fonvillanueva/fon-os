@@ -1,9 +1,36 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { applyMigrations, expectViolation, freshDb, insertTask, resetDb } from "./harness.mjs";
+import {
+  applyMigrations, enrol, expectViolation, freshDb, insertTask, resetDb,
+  signUpWithoutProfile, withUser,
+} from "./harness.mjs";
 
 const TABLES = [
   "tasks", "area_notes", "profiles", "audit_log", "idempotency_keys", "import_batches",
+];
+
+// Phase 4 gives `authenticated` a narrow set of privileges on three of the six
+// tables. These three stay unreachable: audit_log is deferred to Phase 5, and
+// the other two are server-side only.
+const SERVER_ONLY_TABLES = ["audit_log", "idempotency_keys", "import_batches"];
+
+// The exact policy set from docs/phase-4-auth-plan.md §3.3.
+const EXPECTED_POLICIES = [
+  "area_notes.area_notes_abigail_insert",
+  "area_notes.area_notes_abigail_select",
+  "area_notes.area_notes_abigail_update",
+  "area_notes.area_notes_accountability_select",
+  "area_notes.area_notes_fon_insert",
+  "area_notes.area_notes_fon_select",
+  "area_notes.area_notes_fon_update",
+  "profiles.profiles_select_own",
+  "tasks.tasks_abigail_insert",
+  "tasks.tasks_abigail_select",
+  "tasks.tasks_abigail_update",
+  "tasks.tasks_fon_delete",
+  "tasks.tasks_fon_insert",
+  "tasks.tasks_fon_select",
+  "tasks.tasks_fon_update",
 ];
 
 let db;
@@ -26,17 +53,41 @@ describe("every table is locked down", () => {
     expect(rows[0].relforcerowsecurity).toBe(true);
   });
 
-  it("defines no policies at all — the denial is structural, not a rule to remove later", async () => {
-    const { rows } = await db.query("select tablename, policyname from pg_policies where schemaname = 'public'");
+  // Phase 3 asserted zero policies here, because the denial was structural.
+  // Phase 4 adds fifteen, so the assertion is TIGHTENED into an exact,
+  // bidirectional allowlist rather than relaxed: an extra policy fails, and a
+  // missing one fails too. Relaxing it is how a board goes green while the
+  // boundary rots.
+  it("defines exactly the fifteen expected policies and nothing else", async () => {
+    const { rows } = await db.query(
+      "select tablename || '.' || policyname as id from pg_policies where schemaname = 'public' order by id",
+    );
+    expect(rows.map((r) => r.id)).toEqual(EXPECTED_POLICIES);
+  });
+
+  it.each(SERVER_ONLY_TABLES)("still defines no policy at all on %s", async (table) => {
+    const { rows } = await db.query(
+      "select policyname from pg_policies where schemaname = 'public' and tablename = $1",
+      [table],
+    );
     expect(rows).toEqual([]);
   });
 
-  it.each(TABLES)("grants anon and authenticated nothing on %s", async (table) => {
+  it.each(TABLES)("grants anon nothing on %s", async (table) => {
     const { rows } = await db.query(
       `select grantee, privilege_type
          from information_schema.role_table_grants
-        where table_schema = 'public' and table_name = $1
-          and grantee in ('anon', 'authenticated')`,
+        where table_schema = 'public' and table_name = $1 and grantee = 'anon'`,
+      [table],
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it.each(SERVER_ONLY_TABLES)("grants authenticated nothing on %s either", async (table) => {
+    const { rows } = await db.query(
+      `select grantee, privilege_type
+         from information_schema.role_table_grants
+        where table_schema = 'public' and table_name = $1 and grantee = 'authenticated'`,
       [table],
     );
     expect(rows).toEqual([]);
@@ -53,21 +104,25 @@ describe("every table is locked down", () => {
   });
 });
 
-describe("a signed-in user reaches nothing before Phase 4", () => {
+// Phase 3 asserted that ANY signed-in session reached nothing. Phase 4 splits
+// that: an account still grants nothing, but a PROFILED person reaches exactly
+// their row of the matrix. The two halves are separated here rather than the
+// assertion being loosened.
+describe("an account with no profile still reaches nothing", () => {
   beforeEach(async () => {
     await insertTask(db, { area: "work", title: "Confidential client matter" });
     await db.query("insert into public.area_notes (area, note) values ('school', 'Paper week')");
   });
 
-  it.each(["anon", "authenticated"])("denies %s any read of tasks", async (role) => {
-    await db.exec(`set role ${role}`);
+  it("denies anon any read of tasks", async () => {
+    await db.exec("set role anon");
     const error = await expectViolation(() => db.query("select * from public.tasks"));
     expect(error.message).toMatch(/permission denied/i);
     await db.exec("reset role");
   });
 
-  it.each(["anon", "authenticated"])("denies %s any write to tasks", async (role) => {
-    await db.exec(`set role ${role}`);
+  it("denies anon any write to tasks", async () => {
+    await db.exec("set role anon");
     const error = await expectViolation(() =>
       db.query("insert into public.tasks (title, area, created_by) values ('x','inbox','fon')"),
     );
@@ -75,16 +130,67 @@ describe("a signed-in user reaches nothing before Phase 4", () => {
     await db.exec("reset role");
   });
 
-  it.each(TABLES)("denies authenticated any read of %s", async (table) => {
-    await db.exec("set role authenticated");
+  it.each(TABLES)("denies anon any read of %s", async (table) => {
+    await db.exec("set role anon");
     const error = await expectViolation(() => db.query(`select * from public.${table}`));
     expect(error.message).toMatch(/permission denied/i);
     await db.exec("reset role");
   });
 
-  it("denies authenticated the internal app schema", async () => {
+  // The structural guarantee: a stray signup lands here, and reads zero rows
+  // because app.current_app_role() is null and no policy can match.
+  it.each(["tasks", "area_notes", "profiles"])(
+    "gives a signed-in but unprofiled user zero rows from %s", async (table) => {
+      const stray = await signUpWithoutProfile(db);
+      await withUser(db, stray, async () => {
+        const { rows } = await db.query(`select * from public.${table}`);
+        expect(rows).toEqual([]);
+      });
+    },
+  );
+
+  it.each(SERVER_ONLY_TABLES)(
+    "denies even a profiled user any read of %s", async (table) => {
+      const fon = await enrol(db, "fon");
+      await withUser(db, fon, async () => {
+        const error = await expectViolation(() => db.query(`select * from public.${table}`));
+        expect(error.message).toMatch(/permission denied/i);
+      });
+    },
+  );
+});
+
+describe("the internal app schema stays internal", () => {
+  // Phase 3 denied `authenticated` the whole schema. Phase 4 opens exactly one
+  // door: USAGE on the schema and EXECUTE on the role function. The other
+  // functions stay shut, and this is narrowed rather than dropped.
+  it("grants authenticated USAGE on app, and anon nothing", async () => {
+    const { rows } = await db.query(`
+      select has_schema_privilege('authenticated','app','USAGE') as auth_usage,
+             has_schema_privilege('anon','app','USAGE') as anon_usage
+    `);
+    expect(rows[0].auth_usage).toBe(true);
+    expect(rows[0].anon_usage).toBe(false);
+  });
+
+  it("exposes current_app_role() to authenticated and nothing else in app", async () => {
+    const { rows } = await db.query(`
+      select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'app' and has_function_privilege('authenticated', p.oid, 'EXECUTE')
+       order by p.proname
+    `);
+    expect(rows.map((r) => r.proname)).toEqual(["current_app_role"]);
+  });
+
+  it.each([
+    "app.touch_updated_at()",
+    "app.forbid_mutation()",
+    "app.revoke_api_default_privileges()",
+    "app.forbid_provenance_change()",
+    "app.stamp_task_provenance()",
+  ])("still denies authenticated %s", async (signature) => {
     await db.exec("set role authenticated");
-    const error = await expectViolation(() => db.query("select app.touch_updated_at()"));
+    const error = await expectViolation(() => db.query(`select ${signature}`));
     expect(error.message).toMatch(/permission denied|does not exist/i);
     await db.exec("reset role");
   });
@@ -222,6 +328,10 @@ describe("default privileges for tables created later", () => {
         "alter default privileges for role seeding_admin in schema public grant all on tables to anon",
       );
 
+      // Phase 4 revoked EXECUTE on this function from PUBLIC, so the probe role
+      // has to be granted it explicitly. The test is about the warning path,
+      // not about who may call it.
+      await database.exec("grant execute on function app.revoke_api_default_privileges() to limited");
       await database.exec("set role limited");
       await expect(database.exec("select app.revoke_api_default_privileges()")).resolves.not.toThrow();
       await database.exec("reset role");
