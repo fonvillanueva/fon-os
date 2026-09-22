@@ -2,7 +2,8 @@
 
 > **Status: PLANNING ONLY. Nothing here is implemented.**
 >
-> Revision 3, incorporating the closure review of revision 2 (head `3374bd5`).
+> Revision 3, incorporating the closure review of revision 2 (head `3374bd5`),
+> plus a §11 measurement correction made once PR #4 was built from `main`.
 > Contains no migrations, no application code and no dependencies. The SQL is
 > illustrative design, not files to apply.
 >
@@ -811,9 +812,16 @@ reason not to lean on it.
 ### The problem
 
 Tailwind scans the whole project for class-name candidates, including `docs/`.
-Ordinary English in documentation generates unused CSS utilities. Revision 1 of
-this very document added `.invisible{visibility:hidden}` to the production
-bundle, purely because the word *"invisible"* appears in the threat model.
+Ordinary English in documentation generates unused CSS utilities.
+
+Two separate instances, and revision 2 of this document conflated them:
+
+- **On `main` today:** the word *"fixed"* in `docs/claude-import.md` and
+  `docs/phase-3-verification.md` generates `.fixed{position:fixed}`.
+- **On this planning branch only:** the word *"invisible"* in the threat model
+  of this very document generates `.invisible{visibility:hidden}`. That rule
+  does **not** exist on `main`, because its only other source is `supabase/`,
+  already excluded since Phase 3.
 
 ### The change
 
@@ -839,30 +847,80 @@ reader trusts it. PR #4 rewrites it to state what is actually true: all three
 directories are excluded, documentation and scripts are not stylesheet inputs,
 and the byte-identity baseline is the post-#4 build (below).
 
-### Measured effect
+### Measured effect — corrected against `main`
 
-Computed by building with and without the exclusion:
+Revision 2 stated **51 bytes and two rules removed**. That figure was measured
+on *this planning branch*, not on `main`, and it is wrong for PR #4 as built.
+The corrected measurement, taken from `main` at `3dc59ae`:
 
-| Class | Present before | Present after | Verdict |
+| Variant | CSS bytes | Δ | md5 | Rules removed |
+|---|---|---|---|---|
+| baseline (`main`) | 24 491 | — | `baf6880ea9bb` | — |
+| `scripts/` only | 24 491 | **0** | `baf6880ea9bb` | none |
+| `docs/` only | 24 469 | **−22** | `bfc854089977` | `.fixed` |
+| **`docs/` + `scripts/` (PR #4)** | **24 469** | **−22** | `bfc854089977` | `.fixed` |
+
+**Against current `main`, PR #4 removes exactly one generated rule —
+`.fixed{position:fixed}` — reducing the production CSS by 22 bytes.**
+
+Per class:
+
+| Class | On `main` before | After PR #4 | Verdict |
 |---|---|---|---|
-| `.invisible` | yes | **no** | removed |
-| `.fixed` | yes | **no** | removed |
-| `.visible` | yes | **yes** | **retained** — generated from `src/App.test.jsx`, which stays scanned |
+| `.fixed` | present | **absent** | **removed — the 22 bytes** |
+| `.invisible` | **absent** | absent | **never existed on `main`** — its only remaining source is `supabase/`, excluded since Phase 3 |
+| `.visible` | present | **present** | **retained** — generated from `src/App.test.jsx`, which stays scanned |
 
-**51 bytes removed. No rule that any element uses is affected.**
+**Excluding `scripts/` is a byte-identical no-op** — same md5 as baseline.
+`scripts/` holds two build scripts whose only utility-shaped token is `block`,
+which `src/` already generates. It is included so that a future script cannot
+quietly grow the bundle.
 
-*(Revision 1 reported `.visible` as also removed. That was wrong — an artifact
-of diffing on `}` boundaries, which shift when a neighbouring rule disappears.
-Corrected by checking each class directly in both files.)*
+### Where the 51 came from, and why the sequencing still holds
+
+This document's own prose is what generates `.invisible`. Merging PR #3 adds
+that word to `docs/`, and on a tree where `docs/` is still scanned it would add
+`.invisible{visibility:hidden}` — **29 bytes** — to the shipped stylesheet.
+
+```
+22  .fixed{position:fixed}          removed by PR #4, from main, now
+29  .invisible{visibility:hidden}   absent on main; introduced by PR #3's prose
+──                                  unless PR #4 has already landed
+51  the figure revision 2 reported
+```
+
+The arithmetic reconciles exactly, which is what confirms the explanation
+rather than leaving it a guess: revision 2 compared against the planning branch
+instead of against `main`.
+
+**A second live instance, found while writing this correction.** The sentence
+above about a future script quietly growing the bundle put the word *"grow"*
+into `docs/`, which emitted `.grow{flex-grow:1}` — 18 more bytes. So this
+branch now carries **47 bytes** over `main`: 29 for `.invisible`, 18 for
+`.grow`. The wording is deliberately left as it stands rather than contorted to
+dodge the scanner, because that trade is backwards: documentation should read
+well and the build should stop reading documentation. Both rules vanish once
+PR #4 has landed and this branch is rebased.
+
+**PR #4 therefore removes 22 bytes immediately and prevents the further 29
+bytes when PR #3 later merges.** That is precisely why **PR #4 must land before
+PR #3** (§12) — the sequencing requirement is unchanged and, if anything, this
+correction is the clearest statement of its reason.
+
+*(Revision 1 also reported `.visible` as removed. That was wrong too — an
+artifact of diffing on `}` boundaries, which shift when a neighbouring rule
+disappears. Corrected by checking each class directly in both files.)*
 
 ### Required verification in PR #4
 
-Both removed classes must be shown **unused by the application**, not merely
+The removed class must be shown **unused by the application**, not merely
 unused-looking:
 
-- `invisible` appears **nowhere** in `src/` or `index.html`.
 - `fixed` appears **nowhere** in `src/` or `index.html` — it originated in
-  `docs/`.
+  `docs/`. This is the one rule PR #4 actually removes.
+- `invisible` appears **nowhere** in `src/` or `index.html` either, and is
+  **not in the `main` baseline at all** — verify its absence rather than its
+  removal.
 - Distinguish the `focus-visible:` *variant* used throughout `src/App.jsx` from
   the `.visible` *utility*; they are unrelated, and `.visible` is retained
   anyway.
@@ -878,7 +936,8 @@ unused-looking:
 The "byte-identical to `main`" criterion from Phases 1–3 **cannot survive any
 change under `docs/`** and is therefore retired in its old form.
 
-**New baseline: the build produced by PR #4** (post-exclusion). From PR #5
+**New baseline: the build produced by PR #4** (post-exclusion) — CSS
+`bfc854089977`, 24 469 bytes; the JS bundle is unchanged by PR #4. From PR #5
 onward:
 
 - **PR #5** (database + docs) must be byte-identical to the **post-exclusion
@@ -895,7 +954,7 @@ and revision 3 fixes the **order** as well as the numbers:
 
 | Order | PR | Contents | State |
 |---|---|---|---|
-| **1st** | **#4** | Tailwind scope prerequisite: the two `@source not` lines **and** the corrected adjacent comment (`src/App.css`) | Not started |
+| **1st** | **#4** | Tailwind scope prerequisite: the two `@source not` lines **and** the corrected adjacent comment (`src/App.css`) | **Open at `001018d`, not merged** |
 | **2nd** | **#3** | **This plan document only** — rebased onto the post-#4 `main`, then merged | Draft, planning only |
 | **3rd** | **#5** | Database: role function, grants, triggers, policies, view, **Checks 4 / 5 / 5a / 6 / 20**, rollback file, converted `rls.test.mjs` and `migrations.test.mjs` | Not started |
 | **4th** | **#6** | App wiring: sign-in, session handling, CSP, sign-out, external-script test | Not started |
